@@ -13,9 +13,12 @@ backup_create_dir() {
 backup_capture_sysctl() {
   local d="$1"
   mkdir -p "$d/sysctl"
-  cp -a /etc/sysctl.d "$d/sysctl/" 2>/dev/null || true
-  cp -a /etc/sysctl.conf "$d/sysctl/" 2>/dev/null || true
+  # only capture SSO-owned sysctl files
+  cp -a /etc/sysctl.d/99-sso-*.conf "$d/sysctl/" 2>/dev/null || true
+  cp -a /etc/modules-load.d/bbr.conf "$d/sysctl/" 2>/dev/null || true
+  cp -a /etc/sysctl.d/99-sso-rps.conf "$d/sysctl/" 2>/dev/null || true
 }
+
 
 backup_capture_qdisc() {
   local d="$1"
@@ -28,22 +31,17 @@ backup_capture_qdisc() {
 backup_capture_firewall() {
   local d="$1"
   mkdir -p "$d/firewall"
-  if cmd_exists nft; then
-    nft list ruleset > "$d/firewall/nft.rules" 2>/dev/null || true
-  fi
-  if cmd_exists iptables; then
-    iptables-save > "$d/firewall/iptables.rules" 2>/dev/null || true
-  fi
-  if cmd_exists ipset; then
-    ipset save > "$d/firewall/ipset.save" 2>/dev/null || true
-  fi
+  cp -a /etc/systemd/system/sso-firewall.service "$d/firewall/" 2>/dev/null || true
+  cp -a /usr/local/sbin/sso-firewall-restore "$d/firewall/" 2>/dev/null || true
 }
+
 
 backup_capture_fail2ban() {
   local d="$1"
   mkdir -p "$d/fail2ban"
-  cp -a /etc/fail2ban "$d/fail2ban/" 2>/dev/null || true
+  cp -a /etc/fail2ban/jail.local "$d/fail2ban/" 2>/dev/null || true
 }
+
 
 backup_mark() {
   local d="$1"
@@ -83,39 +81,54 @@ restore_from_dir() {
   local d="$1"
   [[ -d "$d" ]] || { err "Backup not found: $d"; return 1; }
 
-  warn "Restoring from: $d"
-  warn "This will restore sysctl, firewall and fail2ban configs captured."
-  # sysctl restore
-  if [[ -d "$d/sysctl/sysctl.d" ]]; then
-    rm -rf /etc/sysctl.d.bak.sso 2>/dev/null || true
-    cp -a /etc/sysctl.d /etc/sysctl.d.bak.sso 2>/dev/null || true
-    rm -rf /etc/sysctl.d
-    cp -a "$d/sysctl/sysctl.d" /etc/sysctl.d
+  warn "Restoring SSO-owned configs from: $d"
+  warn "This rollback is limited to files/services created by SSO."
+
+  # sysctl: remove current SSO files then restore captured ones
+  rm -f /etc/sysctl.d/99-sso-*.conf 2>/dev/null || true
+  rm -f /etc/sysctl.d/99-sso-rps.conf 2>/dev/null || true
+  if compgen -G "$d/sysctl/99-sso-*.conf" >/dev/null; then
+    cp -a "$d/sysctl/99-sso-*.conf" /etc/sysctl.d/ 2>/dev/null || true
   fi
-  if [[ -f "$d/sysctl/sysctl.conf" ]]; then
-    cp -a "$d/sysctl/sysctl.conf" /etc/sysctl.conf
+  if [[ -f "$d/sysctl/99-sso-rps.conf" ]]; then
+    cp -a "$d/sysctl/99-sso-rps.conf" /etc/sysctl.d/ 2>/dev/null || true
+  fi
+  if [[ -f "$d/sysctl/bbr.conf" ]]; then
+    cp -a "$d/sysctl/bbr.conf" /etc/modules-load.d/bbr.conf 2>/dev/null || true
   fi
   sysctl --system >/dev/null 2>&1 || true
 
-  # firewall restore
-  if [[ -f "$d/firewall/nft.rules" ]] && cmd_exists nft; then
-    nft -f "$d/firewall/nft.rules" 2>/dev/null || true
-  fi
-  if [[ -f "$d/firewall/ipset.save" ]] && cmd_exists ipset; then
-    ipset restore < "$d/firewall/ipset.save" 2>/dev/null || true
-  fi
-  if [[ -f "$d/firewall/iptables.rules" ]] && cmd_exists iptables-restore; then
-    iptables-restore < "$d/firewall/iptables.rules" 2>/dev/null || true
+  # CPU/IRQ persistence service restore
+  if [[ -f "$d/sysctl/99-sso-rps.conf" ]] || [[ -f "/etc/systemd/system/sso-cpuirq.service" ]]; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now sso-cpuirq.service 2>/dev/null || true
   fi
 
-  # fail2ban restore
-  if [[ -d "$d/fail2ban/fail2ban" ]]; then
-    rm -rf /etc/fail2ban
-    cp -a "$d/fail2ban/fail2ban" /etc/fail2ban
+  # firewall persistence artifacts
+  rm -f /etc/systemd/system/sso-firewall.service 2>/dev/null || true
+  rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
+  if [[ -f "$d/firewall/sso-firewall.service" ]]; then
+    cp -a "$d/firewall/sso-firewall.service" /etc/systemd/system/ 2>/dev/null || true
+  fi
+  if [[ -f "$d/firewall/sso-firewall-restore" ]]; then
+    cp -a "$d/firewall/sso-firewall-restore" /usr/local/sbin/ 2>/dev/null || true
+    chmod +x /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
+  fi
+  systemctl daemon-reload 2>/dev/null || true
+  if [[ -f /etc/systemd/system/sso-firewall.service ]]; then
+    systemctl enable --now sso-firewall.service 2>/dev/null || true
+  else
+    systemctl disable --now sso-firewall.service 2>/dev/null || true
+  fi
+
+  # fail2ban jail.local restore (only our managed file)
+  if [[ -f "$d/fail2ban/jail.local" ]]; then
+    ensure_dirs /etc/fail2ban
+    cp -a "$d/fail2ban/jail.local" /etc/fail2ban/jail.local 2>/dev/null || true
     systemctl restart fail2ban 2>/dev/null || true
   fi
 
-  ok "Restore completed."
+  ok "Rollback completed."
   pause
 }
 
