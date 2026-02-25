@@ -192,7 +192,7 @@ main_menu() {
     echo "1) System Check"
     echo "2) Network Optimizations"
     echo "3) CPU & IRQ Optimizations"
-    echo "4) Firewall"
+    echo "4) Firewall + Abuse Defender"
     echo "5) Fail2Ban"
     echo "6) Backups & Rollback"
     echo "7) Update"
