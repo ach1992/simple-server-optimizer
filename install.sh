@@ -107,6 +107,27 @@ run_sso() {
   exec bash "$INSTALL_DIR/sso.sh"
 }
 
+
+create_launcher() {
+  # Create a simple command to run SSO without re-installing
+  local target="$INSTALL_DIR/sso.sh"
+  if [[ ! -f "$target" ]]; then
+    return 0
+  fi
+  tee /usr/local/bin/sso >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+INSTALL_DIR_FILE="/etc/ssoptimizer/install_dir"
+if [[ -r "$INSTALL_DIR_FILE" ]]; then
+  INSTALL_DIR="$(cat "$INSTALL_DIR_FILE" 2>/dev/null || true)"
+else
+  INSTALL_DIR="/root/simple-server-optimizer"
+fi
+exec bash "${INSTALL_DIR}/sso.sh" "$@"
+EOF
+  chmod +x /usr/local/bin/sso 2>/dev/null || true
+}
+
 menu() {
   # اگر فایل‌ها از قبل داخل پوشه نصب موجود باشد، فقط همان موقع سؤال آف/آنلاین بپرس
   if has_offline_payload; then
@@ -121,8 +142,8 @@ menu() {
     local choice=""
     read_input "Select: " choice
     case "${choice:-}" in
-      1) run_sso ;;
-      2) download_online; run_sso ;;
+      1) create_launcher; run_sso ;;
+      2) download_online; create_launcher; run_sso ;;
       0) exit 0 ;;
       *) err "Invalid choice."; exit 1 ;;
     esac
@@ -130,6 +151,7 @@ menu() {
     # هیچ فایل آفلاینی نیست → بدون سؤال آنلاین نصب کن
     info "No offline payload found in $INSTALL_DIR → installing ONLINE..."
     download_online
+    create_launcher
     run_sso
   fi
 }
