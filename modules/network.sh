@@ -69,6 +69,13 @@ module_network_show() {
   section "Current network settings"
   tcp_info
   echo ""
+  local cc
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "n/a")"
+  if [[ "$cc" == "bbr" ]]; then
+    ok "BBR is ACTIVE."
+  else
+    warn "BBR is NOT active (current: $cc)."
+  fi
   info "Effective sysctl (SSO files):"
   ls -1 /etc/sysctl.d/99-sso-*.conf 2>/dev/null | sed 's/^/ - /' || true
   echo ""
