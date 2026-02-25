@@ -10,26 +10,41 @@ c_grn="\033[32m"
 c_ylw="\033[33m"
 c_cyn="\033[36m"
 c_wht="\033[97m"
+c_mag="\033[35m"
 
 say()   { printf "%b\n" "$*"; }
 ok()    { say "${c_grn}[+]${c_reset} $*"; }
 info()  { say "${c_cyn}[*]${c_reset} $*"; }
 warn()  { say "${c_ylw}[!]${c_reset} $*"; }
 err()   { say "${c_red}[x]${c_reset} $*"; }
-title() { say "${c_bold}${c_wht}$*${c_reset}"; }
+title() { say "${c_bold}${c_mag}$*${c_reset}"; }
 muted() { say "${c_dim}$*${c_reset}"; }
 
 line() { say "${c_dim}------------------------------------------------------------${c_reset}"; }
 section() { say "${c_bold}$*${c_reset}"; line; }
 
-pause() { read -r -p "Press Enter to continue..." _ || true; }
+# Read from TTY even if script is started via pipe (e.g. curl | bash)
+read_input() {
+  local prompt="${1:-}"
+  local -n __out="$2"
+  [[ -n "$prompt" ]] && printf "%s" "$prompt"
+  if [[ -r /dev/tty ]]; then
+    IFS= read -r __out </dev/tty || true
+  else
+    IFS= read -r __out || true
+  fi
+}
+
+pause() {
+  local _
+  read_input "Press Enter to continue..." _
+}
 
 prompt_choice() {
   local label="${1:-Select}"
-  local ans
+  local ans=""
   while true; do
-    printf "%s: " "$label"
-    read -r ans || true
+    read_input "${label}: " ans
     ans="${ans:-}"
     if [[ "$ans" =~ ^[0-9]+$ ]]; then
       echo "$ans"
@@ -38,6 +53,7 @@ prompt_choice() {
     err "Please enter a number."
   done
 }
+
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
