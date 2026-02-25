@@ -41,6 +41,71 @@ module_cpu_irq_apply_rps() {
 
   info "NIC: $nic | CPUs: $cpus | Mask: $mask"
 
+  # Persist RPS sysctl across reboot
+  tee /etc/sysctl.d/99-sso-rps.conf >/dev/null <<'EOF'
+# SSO: RPS/RFS global settings
+net.core.rps_sock_flow_entries=65536
+EOF
+  sysctl --system >/dev/null 2>&1 || true
+
+  # Create a restore script for queue settings (non-persistent sysfs)
+  ensure_dirs /usr/local/sbin
+  cat > /usr/local/sbin/sso-cpuirq-restore <<'EOS'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+STATE_DIR="/etc/ssoptimizer"
+INSTALL_DIR="$(cat "$STATE_DIR/install_dir" 2>/dev/null || echo "/root/simple-server-optimizer")"
+# shellcheck source=/dev/null
+source "$INSTALL_DIR/modules/utils.sh"
+
+nic="$(detect_nic)"
+cpus="$(nproc)"
+mask="$(python3 - <<PY
+import os
+n=int(os.popen("nproc").read().strip() or "1")
+print(format((1<<n)-1, 'x'))
+PY
+)"
+
+# Apply persisted sysctl just in case
+sysctl -w net.core.rps_sock_flow_entries=65536 >/dev/null 2>&1 || true
+
+for f in /sys/class/net/"$nic"/queues/rx-*/rps_cpus; do
+  [[ -f "$f" ]] || continue
+  echo "$mask" > "$f" || true
+done
+for f in /sys/class/net/"$nic"/queues/rx-*/rps_flow_cnt; do
+  [[ -f "$f" ]] || continue
+  echo 4096 > "$f" || true
+done
+for f in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
+  [[ -f "$f" ]] || continue
+  echo "$mask" > "$f" || true
+done
+EOS
+  chmod +x /usr/local/sbin/sso-cpuirq-restore
+
+  # systemd unit for persistence
+  cat > /etc/systemd/system/sso-cpuirq.service <<'EOF'
+[Unit]
+Description=SSO CPU/IRQ tuning (RPS/RFS/XPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sso-cpuirq-restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable --now sso-cpuirq.service 2>/dev/null || true
+
+
+
   # RFS global table
   sysctl -w net.core.rps_sock_flow_entries=65536 >/dev/null 2>&1 || true
 
