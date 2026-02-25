@@ -147,7 +147,7 @@ menu_backups() {
 menu_update() {
   while true; do
     header
-    section "Update / Mode"
+    section "Update SSO"
     echo "1) Offline/Online note"
     echo "2) Re-run installer (online/offline selector)"
     echo "0) Back"
