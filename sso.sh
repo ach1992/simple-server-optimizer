@@ -19,7 +19,7 @@ ensure_dirs "$STATE_DIR" "$BACKUP_DIR_BASE"
 header() {
   clear || true
   line
-  title "Simple Server Optimizer (SSO) v$VERSION"
+  title "🚀 Simple Server Optimizer (SSO)  v$VERSION"
   muted "Repo: $REPO_URL"
   muted "State: $STATE_DIR"
   muted "Backups: $BACKUP_DIR_BASE"
