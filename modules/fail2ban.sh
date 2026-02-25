@@ -143,8 +143,24 @@ module_fail2ban_status() {
     warn "Fail2Ban not installed."
     pause; return
   fi
+
+  if cmd_exists systemctl; then
+    if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+      warn "Fail2Ban service is not running."
+      info "systemctl status fail2ban (top lines):"
+      systemctl status fail2ban --no-pager -l 2>/dev/null | sed -n '1,60p' || true
+      pause; return
+    fi
+  fi
+
   info "Fetching Fail2Ban status..."
-  fail2ban-client status 2>/dev/null || { err "Failed to read Fail2Ban status."; }
+  if ! fail2ban-client status 2>/dev/null; then
+    err "Failed to read Fail2Ban status."
+    if cmd_exists journalctl; then
+      info "Recent logs (fail2ban):"
+      journalctl -u fail2ban -n 20 --no-pager 2>/dev/null || true
+    fi
+  fi
   pause
 }
 

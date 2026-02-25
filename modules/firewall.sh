@@ -68,18 +68,26 @@ module_firewall_import_blocklist() {
 }
 
 detect_firewall_backend() {
-  firewall_persist_disable
-
-  info "Removing SSO firewall rules..."
-
+  # IMPORTANT: must print ONLY the backend token to stdout (used by callers).
+  # Any diagnostics should go to stderr to avoid breaking case-matching.
   if cmd_exists nft; then
-    echo "nft"
-  elif cmd_exists iptables && cmd_exists ipset; then
-    echo "ipset"
-  else
-    echo "none"
+    # ensure nftables is actually usable (kernel + ruleset access)
+    if nft list ruleset >/dev/null 2>&1; then
+      echo "nft"
+      return 0
+    fi
+    echo "nft-unusable" >&2
+    # fall through to try iptables+ipset as a fallback
   fi
+
+  if cmd_exists iptables && cmd_exists ipset; then
+    echo "ipset"
+    return 0
+  fi
+
+  echo "none"
 }
+
 
 
 
@@ -269,6 +277,10 @@ module_firewall_apply() {
     nft) if ! run_step "Applying firewall rules (nftables)" nft_apply; then pause; return; fi ;;
     ipset) if ! run_step "Applying firewall rules (iptables+ipset)" ipset_apply; then pause; return; fi ;;
     *)
+      if cmd_exists nft; then
+        warn "nft command exists but nftables seems unusable on this system (kernel/module or permissions)."
+        warn "Try: apt-get install nftables && modprobe nf_tables (then re-run), or use iptables+ipset."
+      fi
       err "No supported firewall backend found (need nft OR iptables+ipset)."
       pause; return
       ;;
