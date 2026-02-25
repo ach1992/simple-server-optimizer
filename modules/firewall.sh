@@ -60,11 +60,15 @@ module_firewall_import_blocklist() {
   sanitize_iplist < "$ASSET_BLOCKLIST" > "$STATE_BLOCKLIST"
   ok "Imported into: $STATE_BLOCKLIST"
   ok "Entries: $(wc -l < "$STATE_BLOCKLIST" | tr -d " ")"
+  firewall_persist_enable
+
   ok "Backup: $d"
   pause
 }
 
 detect_firewall_backend() {
+  firewall_persist_disable
+
   if cmd_exists nft; then
     echo "nft"
   elif cmd_exists iptables && cmd_exists ipset; then
@@ -72,6 +76,61 @@ detect_firewall_backend() {
   else
     echo "none"
   fi
+}
+
+
+
+firewall_persist_enable() {
+  ensure_dirs "$STATE_DIR" /usr/local/sbin /etc/systemd/system
+  # store install dir for restore scripts
+  echo "$SSO_DIR" > "$STATE_DIR/install_dir" 2>/dev/null || true
+
+  cat > /usr/local/sbin/sso-firewall-restore <<'EOS'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+STATE_DIR="/etc/ssoptimizer"
+INSTALL_DIR="$(cat "$STATE_DIR/install_dir" 2>/dev/null || echo "/root/simple-server-optimizer")"
+SSO_DIR="$INSTALL_DIR"
+MODULES_DIR="$SSO_DIR/modules"
+ASSETS_DIR="$SSO_DIR/assets"
+# shellcheck source=/dev/null
+source "$MODULES_DIR/utils.sh"
+# shellcheck source=/dev/null
+source "$MODULES_DIR/firewall.sh"
+
+backend="$(detect_firewall_backend)"
+case "$backend" in
+  nft) nft_apply ;;
+  ipset) ipset_apply ;;
+  *) echo "No supported firewall backend." >&2; exit 1 ;;
+esac
+EOS
+  chmod +x /usr/local/sbin/sso-firewall-restore
+
+  cat > /etc/systemd/system/sso-firewall.service <<'EOF'
+[Unit]
+Description=SSO Firewall (blocklist/whitelist)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sso-firewall-restore
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable --now sso-firewall.service 2>/dev/null || true
+}
+
+firewall_persist_disable() {
+  systemctl disable --now sso-firewall.service 2>/dev/null || true
+  rm -f /etc/systemd/system/sso-firewall.service 2>/dev/null || true
+  rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
 }
 
 nft_apply() {
@@ -192,6 +251,8 @@ module_firewall_apply() {
       ;;
   esac
 
+  firewall_persist_enable
+
   ok "Backup: $d"
   pause
 }
@@ -201,6 +262,8 @@ module_firewall_disable() {
   section "Disable SSO firewall rules"
   local d
   d="$(backup_create "firewall:disable")"
+
+  firewall_persist_disable
 
   if cmd_exists nft; then
     nft delete table inet sso 2>/dev/null || true
