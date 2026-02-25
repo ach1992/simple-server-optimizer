@@ -7,9 +7,15 @@ module_cpu_irq_enable_irqbalance() {
   local d
   d="$(backup_create "cpu_irq:irqbalance")"
 
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y irqbalance >/dev/null 2>&1 || true
-  systemctl enable --now irqbalance 2>/dev/null || true
+  run_step "Updating package index" apt-get update -y || true
+  if ! dpkg -s irqbalance >/dev/null 2>&1; then
+    run_step "Installing irqbalance" apt-get install -y irqbalance || true
+    if dpkg -s irqbalance >/dev/null 2>&1; then
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      touch "$STATE_DIR/installed_irqbalance.marker" 2>/dev/null || true
+    fi
+  fi
+  run_step "Enabling irqbalance service" systemctl enable --now irqbalance || true
 
   if systemctl is-active irqbalance >/dev/null 2>&1; then
     ok "irqbalance is active. (Backup: $d)"
@@ -21,7 +27,7 @@ module_cpu_irq_enable_irqbalance() {
 
 hex_mask_all_cpus() {
   local n="$1"
-  python3 - <<PY
+  python3 - "$n" <<'PY'
 import sys
 n=int(sys.argv[1])
 print(format((1<<n)-1, 'x'))
@@ -46,14 +52,14 @@ module_cpu_irq_apply_rps() {
 # SSO: RPS/RFS global settings
 net.core.rps_sock_flow_entries=65536
 EOF
-  sysctl --system >/dev/null 2>&1 || true
+  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
 
   # Create a restore script for queue settings (non-persistent sysfs)
   ensure_dirs /usr/local/sbin
   cat > /usr/local/sbin/sso-cpuirq-restore <<'EOS'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-STATE_DIR="/etc/ssoptimizer"
+STATE_DIR="/etc/sso"
 INSTALL_DIR="$(cat "$STATE_DIR/install_dir" 2>/dev/null || echo "/root/simple-server-optimizer")"
 # shellcheck source=/dev/null
 source "$INSTALL_DIR/modules/utils.sh"
@@ -68,7 +74,7 @@ PY
 )"
 
 # Apply persisted sysctl just in case
-sysctl -w net.core.rps_sock_flow_entries=65536 >/dev/null 2>&1 || true
+  run_step "Setting rps_sock_flow_entries" sysctl -w net.core.rps_sock_flow_entries=65536 || warn "Could not set rps_sock_flow_entries (continuing)."
 
 for f in /sys/class/net/"$nic"/queues/rx-*/rps_cpus; do
   [[ -f "$f" ]] || continue
@@ -101,13 +107,15 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable --now sso-cpuirq.service 2>/dev/null || true
+  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
+  run_step "Enabling SSO CPU/IRQ service" systemctl enable --now sso-cpuirq.service || warn "Could not enable sso-cpuirq.service (continuing)."
 
 
 
   # RFS global table
-  sysctl -w net.core.rps_sock_flow_entries=65536 >/dev/null 2>&1 || true
+  run_step "Setting rps_sock_flow_entries" sysctl -w net.core.rps_sock_flow_entries=65536 || warn "Could not set rps_sock_flow_entries (continuing)."
+
+  info "Applying per-queue RPS/RFS/XPS settings..." 
 
   # Per RX queue
   for f in /sys/class/net/"$nic"/queues/rx-*/rps_cpus; do
@@ -127,7 +135,6 @@ EOF
 
   ok "Applied RPS/RFS/XPS. (Backup: $d)"
   module_cpu_irq_show
-  pause
 }
 
 module_cpu_irq_show() {
@@ -144,4 +151,5 @@ module_cpu_irq_show() {
   echo ""
   info "XPS:"
   grep -H . /sys/class/net/"$nic"/queues/tx-*/xps_cpus 2>/dev/null || true
+  pause
 }

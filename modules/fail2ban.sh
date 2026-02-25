@@ -9,8 +9,14 @@ detect_nginx() {
 
 ensure_fail2ban_installed() {
   if cmd_exists fail2ban-client; then return 0; fi
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y fail2ban >/dev/null 2>&1 || true
+  run_step "Updating package index" apt-get update -y || true
+  if ! dpkg -s fail2ban >/dev/null 2>&1; then
+    run_step "Installing Fail2Ban" apt-get install -y fail2ban || true
+    if dpkg -s fail2ban >/dev/null 2>&1; then
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      touch "$STATE_DIR/installed_fail2ban.marker" 2>/dev/null || true
+    fi
+  fi
   cmd_exists fail2ban-client
 }
 
@@ -61,8 +67,8 @@ module_fail2ban_install_ssh() {
   fi
 
   write_base_jail
-  systemctl enable --now fail2ban 2>/dev/null || true
-  systemctl restart fail2ban 2>/dev/null || true
+  run_step "Enabling Fail2Ban service" systemctl enable --now fail2ban || warn "Could not enable Fail2Ban (continuing)."
+  run_step "Restarting Fail2Ban" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
 
   ok "Fail2Ban enabled (sshd). Backup: $d"
   pause
@@ -95,7 +101,7 @@ enabled = true
 EOF
   fi
 
-  systemctl restart fail2ban 2>/dev/null || true
+  run_step "Restarting Fail2Ban" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
   ok "nginx-http-auth jail enabled. Backup: $d"
   pause
 }
@@ -125,7 +131,7 @@ module_fail2ban_sync_whitelist() {
     sed -i "1iignoreip = ${ips}" "$F2B_JAIL_LOCAL"
   fi
 
-  systemctl restart fail2ban 2>/dev/null || true
+  run_step "Restarting Fail2Ban" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
   ok "Synced ignoreip. Backup: $d"
   pause
 }
@@ -137,7 +143,8 @@ module_fail2ban_status() {
     warn "Fail2Ban not installed."
     pause; return
   fi
-  fail2ban-client status 2>/dev/null || true
+  info "Fetching Fail2Ban status..."
+  fail2ban-client status 2>/dev/null || { err "Failed to read Fail2Ban status."; }
   pause
 }
 
@@ -146,7 +153,7 @@ module_fail2ban_rollback() {
   section "Fail2Ban rollback (restore via backups menu recommended)"
   warn "For full rollback, use: Backups & Rollback -> rollback last/choose."
   warn "This option only stops fail2ban service."
-  systemctl stop fail2ban 2>/dev/null || true
+  run_step "Stopping Fail2Ban" systemctl stop fail2ban || warn "Could not stop Fail2Ban (continuing)."
   ok "Fail2Ban stopped."
   pause
 }

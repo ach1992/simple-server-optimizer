@@ -96,12 +96,12 @@ restore_from_dir() {
   if [[ -f "$d/sysctl/bbr.conf" ]]; then
     cp -a "$d/sysctl/bbr.conf" /etc/modules-load.d/bbr.conf 2>/dev/null || true
   fi
-  sysctl --system >/dev/null 2>&1 || true
+  run_step "Applying sysctl settings (rollback)" sysctl --system || warn "sysctl apply had errors (continuing)."
 
   # CPU/IRQ persistence service restore
   if [[ -f "$d/sysctl/99-sso-rps.conf" ]] || [[ -f "/etc/systemd/system/sso-cpuirq.service" ]]; then
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now sso-cpuirq.service 2>/dev/null || true
+    run_step "Reloading systemd units (rollback)" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
+    run_step "Enabling SSO CPU/IRQ service (rollback)" systemctl enable --now sso-cpuirq.service || warn "Could not enable sso-cpuirq.service (continuing)."
   fi
 
   # firewall persistence artifacts
@@ -114,18 +114,18 @@ restore_from_dir() {
     cp -a "$d/firewall/sso-firewall-restore" /usr/local/sbin/ 2>/dev/null || true
     chmod +x /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
   fi
-  systemctl daemon-reload 2>/dev/null || true
+  run_step "Reloading systemd units (rollback)" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
   if [[ -f /etc/systemd/system/sso-firewall.service ]]; then
-    systemctl enable --now sso-firewall.service 2>/dev/null || true
+    run_step "Enabling SSO firewall service (rollback)" systemctl enable --now sso-firewall.service || warn "Could not enable sso-firewall.service (continuing)."
   else
-    systemctl disable --now sso-firewall.service 2>/dev/null || true
+    run_step "Disabling SSO firewall service (rollback)" systemctl disable --now sso-firewall.service || warn "Could not disable sso-firewall.service (continuing)."
   fi
 
   # fail2ban jail.local restore (only our managed file)
   if [[ -f "$d/fail2ban/jail.local" ]]; then
     ensure_dirs /etc/fail2ban
     cp -a "$d/fail2ban/jail.local" /etc/fail2ban/jail.local 2>/dev/null || true
-    systemctl restart fail2ban 2>/dev/null || true
+    run_step "Restarting Fail2Ban (rollback)" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
   fi
 
   ok "Rollback completed."

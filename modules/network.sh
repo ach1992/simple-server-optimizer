@@ -13,7 +13,7 @@ net.core.default_qdisc=fq
 EOF
 
   # try enable bbr if available
-  modprobe tcp_bbr 2>/dev/null || true
+  run_step "Loading tcp_bbr kernel module" modprobe tcp_bbr || warn "Could not load tcp_bbr (may already be built-in or unavailable)."
   echo tcp_bbr > /etc/modules-load.d/bbr.conf
 
   local avail
@@ -28,10 +28,9 @@ EOF
     rm -f /etc/sysctl.d/99-sso-bbr.conf 2>/dev/null || true
   fi
 
-  sysctl --system >/dev/null 2>&1 || true
+  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
   ok "Applied. (Backup: $d)"
   module_network_show
-  pause
 }
 
 module_network_apply_sysctl() {
@@ -58,10 +57,9 @@ net.ipv4.tcp_keepalive_probes=5
 net.ipv4.ip_local_port_range=10240 65535
 EOF
 
-  sysctl --system >/dev/null 2>&1 || true
+  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
   ok "Applied safe TCP sysctl. (Backup: $d)"
   module_network_show
-  pause
 }
 
 module_network_show() {
@@ -83,4 +81,5 @@ module_network_show() {
   nic="$(detect_nic)"
   info "qdisc ($nic):"
   tc qdisc show dev "$nic" 2>/dev/null || true
+  pause
 }

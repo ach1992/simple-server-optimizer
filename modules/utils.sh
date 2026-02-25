@@ -47,9 +47,15 @@ pause() {
 }
 
 prompt_choice() {
-  local label="${1:-Select}"
+  local label="${1:-Select an option}"
   local ans=""
   while true; do
+    # Put a blank line between the menu and the prompt for readability.
+    if [[ -w /dev/tty ]]; then
+      printf "\n" >/dev/tty
+    else
+      printf "\n" >&2
+    fi
     read_input "${label}: " ans
     ans="${ans:-}"
     if [[ "$ans" =~ ^[0-9]+$ ]]; then
@@ -64,6 +70,18 @@ prompt_choice() {
 " "${c_red}[x]${c_reset} Please enter a number." >&2
     fi
   done
+}
+
+# Run a command while showing progress + colored success/failure.
+run_step() {
+  local msg="$1"; shift
+  info "$msg"
+  if "$@" >/dev/null 2>&1; then
+    ok "$msg - done"
+    return 0
+  fi
+  err "$msg - failed"
+  return 1
 }
 
 

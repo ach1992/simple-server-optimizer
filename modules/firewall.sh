@@ -10,6 +10,7 @@ SSO_CHAIN_OUT="sso_out"
 
 STATE_BLOCKLIST="$STATE_DIR/blocklist-ip.ipv4"
 STATE_WHITELIST="$STATE_DIR/whitelist-ip.ipv4"
+STATE_BTFLAG="$STATE_DIR/bittorrent-block.enabled"
 
 ASSET_BLOCKLIST="$ASSETS_DIR/blocklist-ip.ipv4"
 ASSET_WHITEDEFAULT="$ASSETS_DIR/whitelist-default.ipv4"
@@ -69,6 +70,8 @@ module_firewall_import_blocklist() {
 detect_firewall_backend() {
   firewall_persist_disable
 
+  info "Removing SSO firewall rules..."
+
   if cmd_exists nft; then
     echo "nft"
   elif cmd_exists iptables && cmd_exists ipset; then
@@ -88,7 +91,7 @@ firewall_persist_enable() {
   cat > /usr/local/sbin/sso-firewall-restore <<'EOS'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-STATE_DIR="/etc/ssoptimizer"
+STATE_DIR="/etc/sso"
 INSTALL_DIR="$(cat "$STATE_DIR/install_dir" 2>/dev/null || echo "/root/simple-server-optimizer")"
 SSO_DIR="$INSTALL_DIR"
 MODULES_DIR="$SSO_DIR/modules"
@@ -122,15 +125,15 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl enable --now sso-firewall.service 2>/dev/null || true
+  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
+  run_step "Enabling firewall persistence" systemctl enable --now sso-firewall.service || warn "Could not enable sso-firewall.service (continuing)."
 }
 
 firewall_persist_disable() {
-  systemctl disable --now sso-firewall.service 2>/dev/null || true
+  run_step "Disabling firewall persistence" systemctl disable --now sso-firewall.service || warn "Could not disable sso-firewall.service (continuing)."
   rm -f /etc/systemd/system/sso-firewall.service 2>/dev/null || true
   rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
-  systemctl daemon-reload 2>/dev/null || true
+  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
 }
 
 nft_apply() {
@@ -173,11 +176,21 @@ fi
 
   # rules: whitelist priority
   nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_WHITE} accept" 2>/dev/null || true
+  # Optional: block BitTorrent traffic by common ports (best-effort)
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    nft "add rule inet sso $SSO_CHAIN_IN tcp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+    nft "add rule inet sso $SSO_CHAIN_IN udp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+  fi
   nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_BLOCK} drop" 2>/dev/null || true
 
   nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_WHITE} accept" 2>/dev/null || true
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    nft "add rule inet sso $SSO_CHAIN_OUT tcp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+    nft "add rule inet sso $SSO_CHAIN_OUT udp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+  fi
   nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_BLOCK} drop" 2>/dev/null || true
 
+  nft list table inet sso >/dev/null 2>&1 || { err "nftables apply did not create expected table."; return 1; }
   ok "Applied nftables backend (INPUT+OUTPUT)."
   return 0
 }
@@ -216,13 +229,23 @@ ipset_apply() {
 
   # whitelist priority
   iptables -A SSO_IN  -m set --match-set sso_white_v4 src -j RETURN
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    iptables -A SSO_IN  -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP
+    iptables -A SSO_IN  -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP
+  fi
   iptables -A SSO_IN  -m set --match-set sso_block_v4 src -j DROP
   iptables -A SSO_IN  -j RETURN
 
   iptables -A SSO_OUT -m set --match-set sso_white_v4 dst -j RETURN
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    iptables -A SSO_OUT -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP
+    iptables -A SSO_OUT -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP
+  fi
   iptables -A SSO_OUT -m set --match-set sso_block_v4 dst -j DROP
   iptables -A SSO_OUT -j RETURN
 
+  ipset list sso_block_v4 >/dev/null 2>&1 || { err "ipset apply did not create expected sets."; return 1; }
+  iptables -S SSO_IN >/dev/null 2>&1 || { err "iptables apply did not create expected chains."; return 1; }
   ok "Applied iptables+ipset backend (INPUT+OUTPUT)."
   return 0
 }
@@ -243,8 +266,8 @@ module_firewall_apply() {
   local backend
   backend="$(detect_firewall_backend)"
   case "$backend" in
-    nft) nft_apply ;;
-    ipset) ipset_apply ;;
+    nft) if ! run_step "Applying firewall rules (nftables)" nft_apply; then pause; return; fi ;;
+    ipset) if ! run_step "Applying firewall rules (iptables+ipset)" ipset_apply; then pause; return; fi ;;
     *)
       err "No supported firewall backend found (need nft OR iptables+ipset)."
       pause; return
@@ -295,7 +318,7 @@ module_firewall_whitelist_menu() {
     echo "3) Remove IP/CIDR"
     echo "0) Back"
     local choice
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1)
         header; section "Whitelist"
@@ -338,6 +361,7 @@ module_firewall_status() {
   ensure_default_whitelist
   info "Blocklist entries: $( [[ -f "$STATE_BLOCKLIST" ]] && wc -l < "$STATE_BLOCKLIST" | tr -d " " || echo 0)"
   info "Whitelist entries: $(wc -l < "$STATE_WHITELIST" | tr -d " ")"
+  info "BitTorrent block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
   echo ""
   if [[ "$backend" == "nft" ]]; then
     nft list table inet sso 2>/dev/null | sed -n '1,120p' || true
@@ -345,6 +369,45 @@ module_firewall_status() {
     ipset list sso_block_v4 2>/dev/null | sed -n '1,40p' || true
     iptables -S SSO_IN 2>/dev/null || true
     iptables -S SSO_OUT 2>/dev/null || true
+  fi
+  pause
+}
+
+module_firewall_bittorrent_menu() {
+  header
+  section "BitTorrent traffic block"
+  ensure_dirs "$STATE_DIR"
+
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    warn "BitTorrent blocking is currently ENABLED."
+    echo "1) Disable BitTorrent blocking"
+    echo "0) Back"
+    local choice
+    choice="$(prompt_choice)"
+    case "$choice" in
+      1)
+        rm -f "$STATE_BTFLAG" 2>/dev/null || true
+        ok "BitTorrent blocking disabled."
+        warn "Re-apply firewall (option 2) to update active rules."
+        ;;
+      0) return ;;
+      *) warn "Invalid choice." ;;
+    esac
+  else
+    info "BitTorrent blocking is currently disabled."
+    echo "1) Enable BitTorrent blocking"
+    echo "0) Back"
+    local choice
+    choice="$(prompt_choice)"
+    case "$choice" in
+      1)
+        : > "$STATE_BTFLAG"
+        ok "BitTorrent blocking enabled."
+        warn "Re-apply firewall (option 2) to activate rules."
+        ;;
+      0) return ;;
+      *) warn "Invalid choice." ;;
+    esac
   fi
   pause
 }
