@@ -46,6 +46,15 @@ pause() {
   read_input "Press Enter to continue..." _
 }
 
+flush_tty() {
+  if [[ -r /dev/tty ]]; then
+    local _c
+    while IFS= read -r -t 0.001 -n 1 _c </dev/tty; do
+      :
+    done
+  fi
+}
+
 prompt_choice() {
   local label="${1:-Select an option}"
   local ans=""
@@ -56,6 +65,7 @@ prompt_choice() {
     else
       printf "\n" >&2
     fi
+    flush_tty
     read_input "${label}: " ans
     ans="${ans:-}"
     if [[ "$ans" =~ ^[0-9]+$ ]]; then
