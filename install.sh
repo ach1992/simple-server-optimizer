@@ -17,6 +17,7 @@ err() { say "${c_red}[!]${c_reset} $*"; }
 ok()  { say "${c_grn}[+]${c_reset} $*"; }
 info(){ say "${c_cyn}[*]${c_reset} $*"; }
 warn(){ say "${c_ylw}[!]${c_reset} $*"; }
+
 # Run a command while showing progress + colored success/failure.
 run_step() {
   local msg="$1"; shift
@@ -86,6 +87,20 @@ download_online() {
   # basic sanity check
   grep -q "^#!/" "$tmp/sso.sh" || { err "Downloaded sso.sh looks invalid."; return 1; }
 
+  # ✅ FIX: download install.sh from the correct path (repo root).
+  # If it fails for any reason, fallback to copying the currently running installer (if available).
+  if ! run_step "Downloading install.sh" curl_fetch "${base}/install.sh" "$tmp/install.sh"; then
+    warn "Could not download install.sh from GitHub; trying to save the running installer as fallback..."
+    if [[ -n "${0:-}" && -f "${0}" ]]; then
+      cp -a "${0}" "$tmp/install.sh" || { err "Fallback copy of install.sh failed."; return 1; }
+      ok "Fallback: saved running installer as install.sh - done"
+    else
+      err "Fallback failed: cannot locate running installer path."
+      return 1
+    fi
+  fi
+
+  # modules
   for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh uninstall.sh; do
     run_step "Downloading modules/${f}" curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}" || return 1
   done
@@ -114,11 +129,9 @@ download_online() {
   warn "NOTE: Put your blocklist at: $INSTALL_DIR/assets/blocklist-ip.ipv4 (offline/managed) or keep it in repo."
 }
 
-
 run_sso() {
   exec bash "$INSTALL_DIR/sso.sh"
 }
-
 
 create_launcher() {
   # Create a simple command to run SSO without re-installing
@@ -167,5 +180,4 @@ menu() {
 }
 
 need_root
-
 menu
