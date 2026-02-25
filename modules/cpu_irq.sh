@@ -179,7 +179,7 @@ module_cpu_irq_show() {
       for f in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
         [[ -e "$f" ]] || continue
         if ! cat "$f" >/dev/null 2>&1; then
-          warn "XPS: present but not readable ($f). This is usually a driver/VM limitation; not a script error."
+          warn "Present but not readable ($f). This is usually a driver/VM limitation; not a script error."
         fi
       done
     fi
