@@ -99,11 +99,12 @@ download_online() {
   [[ -d "$INSTALL_DIR" ]] && mv "$INSTALL_DIR" "$INSTALL_DIR.bak" 2>/dev/null || true
   mkdir -p "$INSTALL_DIR"
   cp -a "$tmp/sso.sh" "$INSTALL_DIR/sso.sh"
+  cp -a "$tmp/install.sh" "$INSTALL_DIR/install.sh"
   mkdir -p "$INSTALL_DIR/modules" "$INSTALL_DIR/assets"
   cp -a "$tmp/modules/." "$INSTALL_DIR/modules/"
   cp -a "$tmp/assets/." "$INSTALL_DIR/assets/"
 
-  run_step "Setting executable bit" chmod +x "$INSTALL_DIR/sso.sh" || true
+  run_step "Setting executable bit" chmod +x "$INSTALL_DIR/sso.sh" "$INSTALL_DIR/install.sh" || true
 
   # store install dir for persistence scripts
   mkdir -p /etc/sso

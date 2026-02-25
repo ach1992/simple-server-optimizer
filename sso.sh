@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.0.0"
+SSO_VERSION="1.0.1"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
@@ -10,7 +10,7 @@ BACKUP_DIR_BASE="/root/simple-server-optimizer/backups"
 
 source "$MODULES_DIR/utils.sh"
 
-VERSION="${SSO_VERSION:-1.0.0}"
+VERSION="${SSO_VERSION:-1.0.1}"
 REPO_URL="https://github.com/ach1992/simple-server-optimizer"
 
 require_root
@@ -156,7 +156,28 @@ menu_update() {
         info "Online mode downloads latest scripts. Blocklist file is not automatically downloaded."
         pause
         ;;
-      2) bash "$SSO_DIR/install.sh" ;;
+      2)
+        # Re-run installer even if install.sh is missing locally (robust for online installs)
+        local installer="/tmp/sso-install.sh"
+        local url="https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh"
+        if [[ -f "$SSO_DIR/install.sh" ]]; then
+          info "Re-running local installer..."
+          bash "$SSO_DIR/install.sh" || warn "Installer exited with error."
+        else
+          warn "Local install.sh not found. Downloading installer from GitHub..."
+          if ! cmd_exists curl; then
+            run_step "Installing curl" apt-get update -y || true
+            run_step "Installing curl" apt-get install -y curl || true
+          fi
+          if cmd_exists curl; then
+            run_step "Downloading installer" curl -fsSL "$url" -o "$installer" || { err "Failed to download installer."; pause; break; }
+            bash "$installer" || warn "Installer exited with error."
+          else
+            err "curl is not available; cannot download installer."
+          fi
+        fi
+        ;;
+
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
