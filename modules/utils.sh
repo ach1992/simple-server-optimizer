@@ -46,38 +46,30 @@ pause() {
   read_input "Press Enter to continue..." _
 }
 
-flush_tty() {
-  if [[ -r /dev/tty ]]; then
-    local _c
-    while IFS= read -r -t 0.001 -n 1 _c </dev/tty; do
-      :
-    done
-  fi
-}
-
 prompt_choice() {
   local label="${1:-Select an option}"
+  local -n __out="$2"
   local ans=""
+
   while true; do
-    # Put a blank line between the menu and the prompt for readability.
     if [[ -w /dev/tty ]]; then
       printf "\n" >/dev/tty
     else
       printf "\n" >&2
     fi
-    flush_tty
+
     read_input "${label}: " ans
     ans="${ans:-}"
+
     if [[ "$ans" =~ ^[0-9]+$ ]]; then
-      echo "$ans"
+      __out="$ans"
       return 0
     fi
+
     if [[ -w /dev/tty ]]; then
-      printf "%b
-" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty
+      printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty
     else
-      printf "%b
-" "${c_red}[x]${c_reset} Please enter a number." >&2
+      printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >&2
     fi
   done
 }

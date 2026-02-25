@@ -343,7 +343,7 @@ module_firewall_blacklist_menu() {
     echo "3) Remove IP/CIDR"
     echo "0) Back"
     local choice
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1)
         header; section "Blacklist"
@@ -398,7 +398,7 @@ module_firewall_whitelist_menu() {
     echo "3) Remove IP/CIDR"
     echo "0) Back"
     local choice
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1)
         header; section "Whitelist"
@@ -472,7 +472,7 @@ module_firewall_bittorrent_menu() {
     echo "1) Disable BitTorrent blocking"
     echo "0) Back"
     local choice
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1)
         rm -f "$STATE_BTFLAG" 2>/dev/null || true
@@ -487,7 +487,7 @@ module_firewall_bittorrent_menu() {
     echo "1) Enable BitTorrent blocking"
     echo "0) Back"
     local choice
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1)
         : > "$STATE_BTFLAG"
