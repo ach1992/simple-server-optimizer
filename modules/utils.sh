@@ -97,7 +97,11 @@ net_info() {
   nic="$(detect_nic)"
   info "NIC: $nic"
   ip -s link show dev "$nic" 2>/dev/null | sed -n '1,8p' || true
-  tc qdisc show dev "$nic" 2>/dev/null || true
+  if ip link show "$nic" >/dev/null 2>&1; then
+    tc qdisc show dev "$nic" 2>/dev/null || true
+  else
+    warn "NIC not found: $nic (skipping tc qdisc info)"
+  fi
 }
 
 tcp_info() {
