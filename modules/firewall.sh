@@ -78,6 +78,13 @@ nft_apply() {
   ensure_default_whitelist
   [[ -f "$STATE_BLOCKLIST" ]] || { err "Blocklist not found: $STATE_BLOCKLIST"; return 1; }
 
+# clean previous SSO table/rules (recreate fresh)
+if nft list table inet sso >/dev/null 2>&1; then
+  nft flush table inet sso 2>/dev/null || true
+  nft delete table inet sso 2>/dev/null || true
+fi
+
+
   # Build ruleset (idempotent)
   nft add table inet sso 2>/dev/null || true
   nft "add set inet sso $SSO_SET_BLOCK { type ipv4_addr; flags interval; auto-merge; }" 2>/dev/null || true
@@ -120,7 +127,10 @@ ipset_apply() {
   ensure_default_whitelist
   [[ -f "$STATE_BLOCKLIST" ]] || { err "Blocklist not found: $STATE_BLOCKLIST"; return 1; }
 
-  # create sets
+  # recreate sets (remove old types/settings)
+  ipset destroy sso_block_v4 2>/dev/null || true
+  ipset destroy sso_white_v4 2>/dev/null || true
+
   ipset create sso_block_v4 hash:net family inet maxelem 200000 2>/dev/null || true
   ipset create sso_white_v4 hash:net family inet maxelem 200000 2>/dev/null || true
   ipset flush sso_block_v4 2>/dev/null || true
@@ -231,7 +241,7 @@ module_firewall_whitelist_menu() {
         ;;
       2)
         printf "Enter IP/CIDR to whitelist: "
-        read -r ip || true
+        read_input "" ip
         ip="${ip//[[:space:]]/}"
         if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
         echo "$ip" >> "$STATE_WHITELIST"
@@ -241,7 +251,7 @@ module_firewall_whitelist_menu() {
         ;;
       3)
         printf "Enter IP/CIDR to remove: "
-        read -r ip || true
+        read_input "" ip
         ip="${ip//[[:space:]]/}"
         if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
         grep -vxF "$ip" "$STATE_WHITELIST" > "$STATE_WHITELIST.tmp" || true
