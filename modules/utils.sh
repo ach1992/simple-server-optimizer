@@ -161,3 +161,43 @@ fail2ban_info() {
     info "Fail2Ban: not installed"
   fi
 }
+
+# ---------- IP/CIDR validation ----------
+is_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local IFS='.'
+  local -a o
+  read -r -a o <<<"$ip"
+  [[ ${#o[@]} -eq 4 ]] || return 1
+  local n
+  for n in "${o[@]}"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    (( n >= 0 && n <= 255 )) || return 1
+  done
+  return 0
+}
+
+is_ipv4_cidr() {
+  local cidr="$1"
+  [[ "$cidr" == */* ]] || return 1
+  local ip="${cidr%/*}"
+  local mask="${cidr#*/}"
+  is_ipv4 "$ip" || return 1
+  [[ "$mask" =~ ^[0-9]+$ ]] || return 1
+  (( mask >= 0 && mask <= 32 )) || return 1
+  return 0
+}
+
+validate_ipv4_or_cidr() {
+  local v="${1:-}"
+  [[ -n "$v" ]] || return 1
+  # reject anything with spaces
+  [[ "$v" == "${v//[[:space:]]/}" ]] || return 1
+  if [[ "$v" == */* ]]; then
+    is_ipv4_cidr "$v"
+  else
+    is_ipv4 "$v"
+  fi
+}
+

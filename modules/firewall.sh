@@ -29,6 +29,18 @@ ensure_default_whitelist() {
   mv "$STATE_WHITELIST.tmp" "$STATE_WHITELIST"
 }
 
+
+ensure_state_blocklist() {
+  ensure_dirs "$STATE_DIR"
+  # Create empty blocklist if missing (so user can add entries via menu)
+  if [[ ! -f "$STATE_BLOCKLIST" ]]; then
+    : > "$STATE_BLOCKLIST"
+  fi
+  # Deduplicate / sanitize
+  sanitize_iplist < "$STATE_BLOCKLIST" > "$STATE_BLOCKLIST.tmp" || true
+  mv "$STATE_BLOCKLIST.tmp" "$STATE_BLOCKLIST"
+}
+
 sanitize_iplist() {
   # stdin -> stdout: keep ipv4/cidr lines, remove comments/spaces
   awk '
@@ -146,7 +158,7 @@ firewall_persist_disable() {
 
 nft_apply() {
   ensure_default_whitelist
-  [[ -f "$STATE_BLOCKLIST" ]] || { err "Blocklist not found: $STATE_BLOCKLIST"; return 1; }
+  ensure_state_blocklist
 
 # clean previous SSO table/rules (recreate fresh)
 if nft list table inet sso >/dev/null 2>&1; then
@@ -205,7 +217,7 @@ fi
 
 ipset_apply() {
   ensure_default_whitelist
-  [[ -f "$STATE_BLOCKLIST" ]] || { err "Blocklist not found: $STATE_BLOCKLIST"; return 1; }
+  ensure_state_blocklist
 
   # recreate sets (remove old types/settings)
   ipset destroy sso_block_v4 2>/dev/null || true
@@ -264,8 +276,8 @@ module_firewall_apply() {
   ensure_default_whitelist
 
   if [[ ! -f "$STATE_BLOCKLIST" ]]; then
-    warn "State blocklist not found. Import it first (menu option 1)."
-    pause; return
+    warn "State blocklist not found. Creating empty one so you can add IPs via Blacklist manager."
+    : > "$STATE_BLOCKLIST"
   fi
 
   local d
@@ -319,6 +331,62 @@ module_firewall_disable() {
   pause
 }
 
+
+module_firewall_blacklist_menu() {
+  ensure_state_blocklist
+  while true; do
+    header
+    section "Blacklist manager"
+    echo "Blacklist file: $STATE_BLOCKLIST"
+    echo "1) Show blacklist"
+    echo "2) Add IP/CIDR"
+    echo "3) Remove IP/CIDR"
+    echo "0) Back"
+    local choice
+    choice="$(prompt_choice)"
+    case "$choice" in
+      1)
+        header; section "Blacklist"
+        nl -w2 -s') ' "$STATE_BLOCKLIST" || true
+        pause
+        ;;
+      2)
+        printf "Enter IP/CIDR to blacklist: "
+        read_input "" ip
+        ip="${ip//[[:space:]]/}"
+        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
+        if ! validate_ipv4_or_cidr "$ip"; then
+          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
+          pause; continue
+        fi
+        echo "$ip" >> "$STATE_BLOCKLIST"
+        ensure_state_blocklist
+        ok "Added."
+        warn "Re-apply firewall (menu option 2) to activate rules."
+        pause
+        ;;
+      3)
+        printf "Enter IP/CIDR to remove: "
+        read_input "" ip
+        ip="${ip//[[:space:]]/}"
+        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
+        if ! validate_ipv4_or_cidr "$ip"; then
+          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
+          pause; continue
+        fi
+        grep -vxF "$ip" "$STATE_BLOCKLIST" > "$STATE_BLOCKLIST.tmp" || true
+        mv "$STATE_BLOCKLIST.tmp" "$STATE_BLOCKLIST"
+        ensure_state_blocklist
+        ok "Removed (if existed)."
+        warn "Re-apply firewall (menu option 2) to update active rules."
+        pause
+        ;;
+      0) return ;;
+      *) warn "Invalid choice." ;;
+    esac
+  done
+}
+
 module_firewall_whitelist_menu() {
   ensure_default_whitelist
   while true; do
@@ -342,6 +410,10 @@ module_firewall_whitelist_menu() {
         read_input "" ip
         ip="${ip//[[:space:]]/}"
         if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
+        if ! validate_ipv4_or_cidr "$ip"; then
+          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
+          pause; continue
+        fi
         echo "$ip" >> "$STATE_WHITELIST"
         ensure_default_whitelist
         ok "Added."
@@ -352,6 +424,10 @@ module_firewall_whitelist_menu() {
         read_input "" ip
         ip="${ip//[[:space:]]/}"
         if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
+        if ! validate_ipv4_or_cidr "$ip"; then
+          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
+          pause; continue
+        fi
         grep -vxF "$ip" "$STATE_WHITELIST" > "$STATE_WHITELIST.tmp" || true
         mv "$STATE_WHITELIST.tmp" "$STATE_WHITELIST"
         ensure_default_whitelist
@@ -371,6 +447,7 @@ module_firewall_status() {
   backend="$(detect_firewall_backend)"
   info "Backend: $backend"
   ensure_default_whitelist
+  ensure_state_blocklist
   info "Blocklist entries: $( [[ -f "$STATE_BLOCKLIST" ]] && wc -l < "$STATE_BLOCKLIST" | tr -d " " || echo 0)"
   info "Whitelist entries: $(wc -l < "$STATE_WHITELIST" | tr -d " ")"
   info "BitTorrent block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
