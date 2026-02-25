@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.0.0"
+SSO_VERSION="1.0.3"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
@@ -45,7 +45,7 @@ menu_network() {
     echo "2) Apply safe TCP tuning (backlog/timewait/keepalive)"
     echo "3) Show current tuning"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) module_network_enable_fq_bbr ;;
       2) module_network_apply_sysctl ;;
@@ -64,7 +64,7 @@ menu_cpu_irq() {
     echo "2) Apply RPS/RFS/XPS (auto NIC)"
     echo "3) Show current IRQ/RPS status"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) module_cpu_irq_enable_irqbalance ;;
       2) module_cpu_irq_apply_rps ;;
@@ -84,14 +84,16 @@ menu_firewall() {
     echo "3) Remove/Disable SSO firewall rules (rollback firewall only)"
     echo "4) Whitelist manager (add/remove/show)"
     echo "5) Status (counts + active backend)"
+    echo "6) Block BitTorrent traffic (ports + common tracker ports)"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) module_firewall_import_blocklist ;;
       2) module_firewall_apply ;;
       3) module_firewall_disable ;;
       4) module_firewall_whitelist_menu ;;
       5) module_firewall_status ;;
+      6) module_firewall_bittorrent_menu ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
@@ -108,7 +110,7 @@ menu_fail2ban() {
     echo "4) Status"
     echo "5) Disable Fail2Ban changes (rollback f2b only)"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) module_fail2ban_install_ssh ;;
       2) module_fail2ban_enable_nginx ;;
@@ -129,7 +131,7 @@ menu_backups() {
     echo "2) Rollback last backup"
     echo "3) Rollback choose backup"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) module_rollback_list ;;
       2) module_rollback_last ;;
@@ -147,14 +149,14 @@ menu_update() {
     echo "1) Offline/Online note"
     echo "2) Re-run installer (online/offline selector)"
     echo "0) Back"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1)
         info "If files exist in /root/simple-server-optimizer, installer can run offline."
         info "Online mode downloads latest scripts. Blocklist file is not automatically downloaded."
         pause
         ;;
-      2) exec bash "$SSO_DIR/install.sh" ;;
+      2) bash "$SSO_DIR/install.sh" ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
@@ -171,8 +173,9 @@ main_menu() {
     echo "5) Fail2Ban"
     echo "6) Backups & Rollback"
     echo "7) Update / Mode"
+    echo "8) Uninstall (rollback + remove SSO)"
     echo "0) Exit"
-    choice="$(prompt_choice "Select")"
+    choice="$(prompt_choice)"
     case "$choice" in
       1) system_check ;;
       2) menu_network ;;
@@ -181,6 +184,7 @@ main_menu() {
       5) menu_fail2ban ;;
       6) menu_backups ;;
       7) menu_update ;;
+      8) module_uninstall ;;
       0) exit 0 ;;
       *) warn "Invalid choice." ;;
     esac
@@ -193,5 +197,6 @@ source "$MODULES_DIR/network.sh"
 source "$MODULES_DIR/cpu_irq.sh"
 source "$MODULES_DIR/firewall.sh"
 source "$MODULES_DIR/fail2ban.sh"
+source "$MODULES_DIR/uninstall.sh"
 
 main_menu

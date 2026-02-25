@@ -17,6 +17,17 @@ err() { say "${c_red}[!]${c_reset} $*"; }
 ok()  { say "${c_grn}[+]${c_reset} $*"; }
 info(){ say "${c_cyn}[*]${c_reset} $*"; }
 warn(){ say "${c_ylw}[!]${c_reset} $*"; }
+# Run a command while showing progress + colored success/failure.
+run_step() {
+  local msg="$1"; shift
+  info "$msg"
+  if "$@" >/dev/null 2>&1; then
+    ok "$msg - done"
+    return 0
+  fi
+  err "$msg - failed"
+  return 1
+}
 
 # Read from TTY even if script is started via pipe (e.g. curl | bash)
 read_input() {
@@ -40,8 +51,8 @@ need_root() {
 ensure_tools() {
   if command -v curl >/dev/null 2>&1; then return 0; fi
   warn "curl not found. Installing..."
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
+  run_step "Updating package index" apt-get update -y || true
+  run_step "Installing curl + CA certs" apt-get install -y curl ca-certificates || true
   command -v curl >/dev/null 2>&1 || { err "curl install failed."; exit 1; }
 }
 
@@ -71,15 +82,15 @@ download_online() {
     [[ -s "$out" ]] || { err "Downloaded file is empty: $url"; return 1; }
   }
 
-  curl_fetch "${base}/sso.sh" "$tmp/sso.sh"
+  run_step "Downloading sso.sh" curl_fetch "${base}/sso.sh" "$tmp/sso.sh" || return 1
   # basic sanity check
   grep -q "^#!/" "$tmp/sso.sh" || { err "Downloaded sso.sh looks invalid."; return 1; }
 
   for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh; do
-    curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}"
+    run_step "Downloading modules/${f}" curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}" || return 1
   done
 
-  curl_fetch "${base}/assets/whitelist-default.ipv4" "$tmp/assets/whitelist-default.ipv4"
+  run_step "Downloading whitelist-default.ipv4" curl_fetch "${base}/assets/whitelist-default.ipv4" "$tmp/assets/whitelist-default.ipv4" || return 1
   # blocklist in repo may be optional; don't fail if missing
   curl -fL -sS "${base}/assets/blocklist-ip.ipv4" -o "$tmp/assets/blocklist-ip.ipv4" >/dev/null 2>&1 || true
 
@@ -92,11 +103,11 @@ download_online() {
   cp -a "$tmp/modules/." "$INSTALL_DIR/modules/"
   cp -a "$tmp/assets/." "$INSTALL_DIR/assets/"
 
-  chmod +x "$INSTALL_DIR/sso.sh"
+  run_step "Setting executable bit" chmod +x "$INSTALL_DIR/sso.sh" || true
 
   # store install dir for persistence scripts
-  mkdir -p /etc/ssoptimizer
-  echo "$INSTALL_DIR" > /etc/ssoptimizer/install_dir 2>/dev/null || true
+  mkdir -p /etc/sso
+  echo "$INSTALL_DIR" > /etc/sso/install_dir 2>/dev/null || true
 
   ok "Online download complete."
   warn "NOTE: Put your blocklist at: $INSTALL_DIR/assets/blocklist-ip.ipv4 (offline/managed) or keep it in repo."
@@ -117,7 +128,7 @@ create_launcher() {
   tee /usr/local/bin/sso >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-INSTALL_DIR_FILE="/etc/ssoptimizer/install_dir"
+INSTALL_DIR_FILE="/etc/sso/install_dir"
 if [[ -r "$INSTALL_DIR_FILE" ]]; then
   INSTALL_DIR="$(cat "$INSTALL_DIR_FILE" 2>/dev/null || true)"
 else
@@ -129,7 +140,6 @@ EOF
 }
 
 menu() {
-  # اگر فایل‌ها از قبل داخل پوشه نصب موجود باشد، فقط همان موقع سؤال آف/آنلاین بپرس
   if has_offline_payload; then
     say ""
     say "${c_cyn}Simple Server Optimizer - Installer${c_reset}"
@@ -140,7 +150,7 @@ menu() {
     say "2) Use ONLINE  (download latest from GitHub)"
     say "0) Exit"
     local choice=""
-    read_input "Select: " choice
+    read_input "Select an option: " choice
     case "${choice:-}" in
       1) create_launcher; run_sso ;;
       2) download_online; create_launcher; run_sso ;;
@@ -148,7 +158,6 @@ menu() {
       *) err "Invalid choice."; exit 1 ;;
     esac
   else
-    # هیچ فایل آفلاینی نیست → بدون سؤال آنلاین نصب کن
     info "No offline payload found in $INSTALL_DIR → installing ONLINE..."
     download_online
     create_launcher

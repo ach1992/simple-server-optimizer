@@ -157,7 +157,7 @@ Run rollback from the menu or via the rollback module (depending on your workflo
 ## Files & Directories Created by SSO
 
 Common paths:
-- `/etc/ssoptimizer/install_dir` (stores install directory for restore services)
+- `/etc/sso/install_dir` (stores install directory for restore services)
 - `/etc/sysctl.d/99-sso-*.conf` (SSO sysctl settings)
 - `/usr/local/sbin/sso-*-restore` (restore scripts)
 - `/etc/systemd/system/sso-*.service` (systemd services)
