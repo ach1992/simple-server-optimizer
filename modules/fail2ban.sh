@@ -14,6 +14,19 @@ ensure_fail2ban_installed() {
   cmd_exists fail2ban-client
 }
 
+
+
+ensure_jail_local() {
+  ensure_dirs /etc/fail2ban
+  if [[ ! -f "$F2B_JAIL_LOCAL" ]]; then
+    # create a sane default
+    write_base_jail
+  else
+    # make sure it is writable/readable
+    touch "$F2B_JAIL_LOCAL" 2>/dev/null || true
+  fi
+}
+
 write_base_jail() {
   ensure_dirs /etc/fail2ban
 
@@ -71,9 +84,7 @@ module_fail2ban_enable_nginx() {
     pause; return
   fi
 
-  if [[ ! -f "$F2B_JAIL_LOCAL" ]]; then
-    write_base_jail
-  fi
+  ensure_jail_local
 
   # Basic nginx auth / bad bots jails depend on distro filters; keep simple:
   if ! grep -q "^\[nginx-http-auth\]" "$F2B_JAIL_LOCAL" 2>/dev/null; then
@@ -105,9 +116,7 @@ module_fail2ban_sync_whitelist() {
   local ips
   ips="$(tr '\n' ' ' < "$STATE_WHITELIST" | xargs echo || true)"
 
-  if [[ ! -f "$F2B_JAIL_LOCAL" ]]; then
-    write_base_jail
-  fi
+  ensure_jail_local
 
   # replace or add ignoreip
   if grep -q "^ignoreip" "$F2B_JAIL_LOCAL"; then
