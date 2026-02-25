@@ -43,17 +43,27 @@ Other distributions are **not** targeted (by design).
 
 ## Quick Start
 
-### 1) Download the project
-Clone or download the repository to your server.
+### Option A: One-line installer (recommended)
+Run this as root (Debian/Ubuntu):
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh)
+```
 
-### 2) Run the installer (recommended)
+### Option B: Offline / local install
+Clone or download the repository to your server, then:
 ```bash
 sudo bash install.sh
 ```
 
-### 3) Run the main menu
+### Run after installation (no reinstall needed)
+The installer creates a small launcher command:
 ```bash
-sudo bash sso.sh
+sudo sso
+```
+
+If you prefer the direct path:
+```bash
+sudo bash /root/simple-server-optimizer/sso.sh
 ```
 
 ---
@@ -168,6 +178,13 @@ Common paths:
   ```
 - Re-apply from the menu once, then reboot and re-check.
 
+### Check if BBR is active
+Run:
+```bash
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.core.default_qdisc
+```
+
 ### NIC detection issues
 If the server has unusual routing (no default route), NIC auto-detection may fall back to a default (e.g., `eth0`).  
 You can adjust NIC selection logic in the networking module if needed.
@@ -183,4 +200,4 @@ You can adjust NIC selection logic in the networking module if needed.
 ---
 
 ## License
-MIT.
+License (MIT).
