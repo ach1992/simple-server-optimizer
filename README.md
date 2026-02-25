@@ -45,8 +45,11 @@ Other distributions are **not** targeted (by design).
 
 ### Option A: One-line installer (recommended)
 Run this as root (Debian/Ubuntu):
+
+> Note: Some minimal environments don't support `bash <(curl ...)` (no `/dev/fd`). The command above avoids that.
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh)
+curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh -o /tmp/sso-install.sh \
+  && sudo bash /tmp/sso-install.sh
 ```
 
 ### Option B: Offline / local install
