@@ -1,6 +1,6 @@
 # SSO default whitelist (priority over blocklist)
 # Required:
-10.235.8.0/21
+10.235.0.0/19
 
 # Safe private/reserved ranges to reduce accidental breakage:
 10.0.0.0/8
