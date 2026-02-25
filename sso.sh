@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.0.3"
+SSO_VERSION="1.0.0"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
