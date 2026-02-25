@@ -84,10 +84,19 @@ for f in /sys/class/net/"$nic"/queues/rx-*/rps_flow_cnt; do
   [[ -f "$f" ]] || continue
   echo 4096 > "$f" || true
 done
+_xps_any=false
+_xps_failed=false
 for f in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
-  [[ -f "$f" ]] || continue
-  echo "$mask" > "$f" || true
+  [[ -e "$f" ]] || continue
+  _xps_any=true
+  if ! echo "$mask" > "$f" 2>/dev/null; then
+    _xps_failed=true
+  fi
 done
+
+if [[ "$_xps_any" == true && "$_xps_failed" == true ]]; then
+  warn "XPS: kernel/driver rejected writing xps_cpus (common on virtio single-queue)."
+fi
 EOS
   chmod +x /usr/local/sbin/sso-cpuirq-restore
 
@@ -128,10 +137,22 @@ EOF
   done
 
   # XPS for TX queues
+  local xps_any=false xps_failed=false
   for f in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
-    [[ -f "$f" ]] || continue
-    echo "$mask" > "$f" || true
+    [[ -e "$f" ]] || continue
+    xps_any=true
+    if ! echo "$mask" > "$f" 2>/dev/null; then
+      xps_failed=true
+    fi
   done
+
+  if [[ "$xps_any" == false ]]; then
+    info "XPS: no TX queues found (nothing to apply)."
+  elif [[ "$xps_failed" == true ]]; then
+    warn "XPS: kernel/driver rejected writing xps_cpus (common on virtio single-queue). XPS skipped."
+  else
+    ok "XPS: applied successfully."
+  fi
 
   ok "Applied RPS/RFS/XPS. (Backup: $d)"
   module_cpu_irq_show
@@ -150,6 +171,20 @@ module_cpu_irq_show() {
   grep -H . /sys/class/net/"$nic"/queues/rx-*/rps_flow_cnt 2>/dev/null || true
   echo ""
   info "XPS:"
-  grep -H . /sys/class/net/"$nic"/queues/tx-*/xps_cpus 2>/dev/null || true
+  if compgen -G "/sys/class/net/$nic/queues/tx-*/xps_cpus" >/dev/null; then
+    # Fast path: show values when readable
+    if ! grep -H . /sys/class/net/"$nic"/queues/tx-*/xps_cpus 2>/dev/null; then
+      # If read fails (sysfs can return ENOENT/EIO), show a clear message.
+      local f
+      for f in /sys/class/net/"$nic"/queues/tx-*/xps_cpus; do
+        [[ -e "$f" ]] || continue
+        if ! cat "$f" >/dev/null 2>&1; then
+          warn "XPS: present but not readable ($f). This is usually a driver/VM limitation; not a script error."
+        fi
+      done
+    fi
+  else
+    info "XPS: no TX queues/xps_cpus found."
+  fi
   pause
 }
