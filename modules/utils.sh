@@ -105,8 +105,11 @@ net_info() {
 }
 
 tcp_info() {
+  local cc
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "n/a")"
   info "qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null || echo "n/a")"
-  info "congestion: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "n/a")"
+  info "congestion: ${cc}"
+  info "BBR: $([[ "$cc" == "bbr" ]] && echo "ACTIVE" || echo "NOT ACTIVE")"
   info "available cc: $(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "n/a")"
 }
 
