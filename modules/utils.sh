@@ -27,7 +27,13 @@ section() { say "${c_bold}$*${c_reset}"; line; }
 read_input() {
   local prompt="${1:-}"
   local -n __out="$2"
-  [[ -n "$prompt" ]] && printf "%s" "$prompt"
+  if [[ -n "$prompt" ]]; then
+    if [[ -w /dev/tty ]]; then
+      printf "%s" "$prompt" >/dev/tty
+    else
+      printf "%s" "$prompt" >&2
+    fi
+  fi
   if [[ -r /dev/tty ]]; then
     IFS= read -r __out </dev/tty || true
   else
@@ -50,7 +56,13 @@ prompt_choice() {
       echo "$ans"
       return 0
     fi
-    err "Please enter a number."
+    if [[ -w /dev/tty ]]; then
+      printf "%b
+" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty
+    else
+      printf "%b
+" "${c_red}[x]${c_reset} Please enter a number." >&2
+    fi
   done
 }
 
