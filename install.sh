@@ -18,6 +18,18 @@ ok()  { say "${c_grn}[+]${c_reset} $*"; }
 info(){ say "${c_cyn}[*]${c_reset} $*"; }
 warn(){ say "${c_ylw}[!]${c_reset} $*"; }
 
+# Read from TTY even if script is started via pipe (e.g. curl | bash)
+read_input() {
+  local prompt="${1:-}"
+  local -n __out="$2"
+  [[ -n "$prompt" ]] && printf "%s" "$prompt"
+  if [[ -r /dev/tty ]]; then
+    IFS= read -r __out </dev/tty || true
+  else
+    IFS= read -r __out || true
+  fi
+}
+
 need_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     err "Please run as root."
@@ -61,36 +73,30 @@ run_sso() {
 }
 
 menu() {
-  while true; do
+  if has_offline_payload; then
     say ""
     say "${c_cyn}Simple Server Optimizer - Installer${c_reset}"
     say "Install dir: $INSTALL_DIR"
     say ""
-    say "1) Offline (use local files)"
-    say "2) Online  (download latest from GitHub)"
+    say "${c_grn}[+]${c_reset} Offline payload detected."
+    say "1) Use OFFLINE (local files)"
+    say "2) Use ONLINE  (download latest from GitHub)"
     say "0) Exit"
-    printf "Select: "
-    read -r choice || true
-
+    local choice=""
+    read_input "Select: " choice
     case "${choice:-}" in
-      1)
-        if has_offline_payload; then
-          ok "Offline payload found."
-          run_sso
-        else
-          err "Offline payload not found in $INSTALL_DIR"
-          err "Expected: sso.sh, modules/*, assets/*"
-        fi
-        ;;
-      2)
-        download_online
-        run_sso
-        ;;
+      1) run_sso ;;
+      2) download_online; run_sso ;;
       0) exit 0 ;;
-      *) err "Invalid choice. Try again." ;;
+      *) err "Invalid choice."; exit 1 ;;
     esac
-  done
+  else
+    info "No offline payload found in $INSTALL_DIR → installing ONLINE..."
+    download_online
+    run_sso
+  fi
 }
 
 need_root
+
 menu
