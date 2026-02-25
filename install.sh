@@ -44,7 +44,6 @@ download_online() {
 
   info "Downloading latest SSO from GitHub..."
   curl -fsSL "${base}/sso.sh" -o "$INSTALL_DIR/sso.sh"
-  curl -fsSL "${base}/VERSION" -o "$INSTALL_DIR/VERSION"
 
   for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh; do
     curl -fsSL "${base}/modules/${f}" -o "$INSTALL_DIR/modules/${f}"
