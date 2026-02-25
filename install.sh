@@ -86,7 +86,7 @@ download_online() {
   # basic sanity check
   grep -q "^#!/" "$tmp/sso.sh" || { err "Downloaded sso.sh looks invalid."; return 1; }
 
-  for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh; do
+  for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh uninstall.sh; do
     run_step "Downloading modules/${f}" curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}" || return 1
   done
 
