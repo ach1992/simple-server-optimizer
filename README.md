@@ -34,7 +34,7 @@ It is designed to be:
 
 ## Supported OS
 
-- Debian 10/11/12
+- Debian 10/11/12/13
 - Ubuntu 20.04 / 22.04 / 24.04
 
 Other distributions are **not** targeted (by design).
