@@ -45,7 +45,7 @@ menu_network() {
     echo "2) Apply safe TCP tuning (backlog/timewait/keepalive)"
     echo "3) Show current tuning"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) module_network_enable_fq_bbr ;;
       2) module_network_apply_sysctl ;;
@@ -64,7 +64,7 @@ menu_cpu_irq() {
     echo "2) Apply RPS/RFS/XPS (auto NIC)"
     echo "3) Show current IRQ/RPS status"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) module_cpu_irq_enable_irqbalance ;;
       2) module_cpu_irq_apply_rps ;;
@@ -87,7 +87,7 @@ menu_firewall() {
     echo "6) Status (counts + active backend)"
     echo "7) Block BitTorrent traffic (ports + common tracker ports)"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) module_firewall_import_blocklist ;;
       2) module_firewall_apply ;;
@@ -112,7 +112,7 @@ menu_fail2ban() {
     echo "4) Status"
     echo "5) Disable Fail2Ban changes (rollback f2b only)"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) module_fail2ban_install_ssh ;;
       2) module_fail2ban_enable_nginx ;;
@@ -133,7 +133,7 @@ menu_backups() {
     echo "2) Rollback last backup"
     echo "3) Rollback choose backup"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) module_rollback_list ;;
       2) module_rollback_last ;;
@@ -151,7 +151,7 @@ menu_update() {
     echo "1) Offline/Online note"
     echo "2) Re-run installer (online/offline selector)"
     echo "0) Back"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1)
         info "If files exist in /root/simple-server-optimizer, installer can run offline."
@@ -198,7 +198,7 @@ main_menu() {
     echo "7) Update"
     echo "8) Uninstall (rollback + remove SSO)"
     echo "0) Exit"
-    choice="$(prompt_choice)"
+    prompt_choice "Select an option" choice
     case "$choice" in
       1) system_check ;;
       2) menu_network ;;
