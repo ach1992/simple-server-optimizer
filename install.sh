@@ -41,7 +41,7 @@ ensure_tools() {
   if command -v curl >/dev/null 2>&1; then return 0; fi
   warn "curl not found. Installing..."
   apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y curl >/dev/null 2>&1 || true
+  apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
   command -v curl >/dev/null 2>&1 || { err "curl install failed."; exit 1; }
 }
 
@@ -51,28 +51,64 @@ has_offline_payload() {
 
 download_online() {
   ensure_tools
-  mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/modules" "$INSTALL_DIR/assets"
+  mkdir -p "$INSTALL_DIR"
+
   local base="https://raw.githubusercontent.com/${REPO_SLUG}/${BRANCH}"
 
-  info "Downloading latest SSO from GitHub..."
-  curl -fsSL "${base}/sso.sh" -o "$INSTALL_DIR/sso.sh"
+  info "Downloading latest SSO from GitHub (online)..."
+
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp" 2>/dev/null || true' RETURN
+
+  mkdir -p "$tmp/modules" "$tmp/assets"
+
+  curl_fetch() {
+    local url="$1"
+    local out="$2"
+    # retry helps on flaky networks
+    curl -fL --retry 5 --retry-delay 1 --retry-all-errors -sS "$url" -o "$out"
+    [[ -s "$out" ]] || { err "Downloaded file is empty: $url"; return 1; }
+  }
+
+  curl_fetch "${base}/sso.sh" "$tmp/sso.sh"
+  # basic sanity check
+  grep -q "^#!/" "$tmp/sso.sh" || { err "Downloaded sso.sh looks invalid."; return 1; }
 
   for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh; do
-    curl -fsSL "${base}/modules/${f}" -o "$INSTALL_DIR/modules/${f}"
+    curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}"
   done
 
-  curl -fsSL "${base}/assets/whitelist-default.ipv4" -o "$INSTALL_DIR/assets/whitelist-default.ipv4"
+  curl_fetch "${base}/assets/whitelist-default.ipv4" "$tmp/assets/whitelist-default.ipv4"
+  # blocklist in repo may be optional; don't fail if missing
+  curl -fL -sS "${base}/assets/blocklist-ip.ipv4" -o "$tmp/assets/blocklist-ip.ipv4" >/dev/null 2>&1 || true
+
+  # atomically replace install dir content
+  rm -rf "$INSTALL_DIR.bak" 2>/dev/null || true
+  [[ -d "$INSTALL_DIR" ]] && mv "$INSTALL_DIR" "$INSTALL_DIR.bak" 2>/dev/null || true
+  mkdir -p "$INSTALL_DIR"
+  cp -a "$tmp/sso.sh" "$INSTALL_DIR/sso.sh"
+  mkdir -p "$INSTALL_DIR/modules" "$INSTALL_DIR/assets"
+  cp -a "$tmp/modules/." "$INSTALL_DIR/modules/"
+  cp -a "$tmp/assets/." "$INSTALL_DIR/assets/"
 
   chmod +x "$INSTALL_DIR/sso.sh"
+
+  # store install dir for persistence scripts
+  mkdir -p /etc/ssoptimizer
+  echo "$INSTALL_DIR" > /etc/ssoptimizer/install_dir 2>/dev/null || true
+
   ok "Online download complete."
-  warn "NOTE: Put your blocklist at: $INSTALL_DIR/assets/blocklist-ip.ipv4 (offline) or keep it in repo."
+  warn "NOTE: Put your blocklist at: $INSTALL_DIR/assets/blocklist-ip.ipv4 (offline/managed) or keep it in repo."
 }
+
 
 run_sso() {
   exec bash "$INSTALL_DIR/sso.sh"
 }
 
 menu() {
+  # اگر فایل‌ها از قبل داخل پوشه نصب موجود باشد، فقط همان موقع سؤال آف/آنلاین بپرس
   if has_offline_payload; then
     say ""
     say "${c_cyn}Simple Server Optimizer - Installer${c_reset}"
@@ -91,6 +127,7 @@ menu() {
       *) err "Invalid choice."; exit 1 ;;
     esac
   else
+    # هیچ فایل آفلاینی نیست → بدون سؤال آنلاین نصب کن
     info "No offline payload found in $INSTALL_DIR → installing ONLINE..."
     download_online
     run_sso
