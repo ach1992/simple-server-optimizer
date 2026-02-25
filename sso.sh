@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.0.1"
+SSO_VERSION="1.0.0"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
@@ -10,7 +10,7 @@ BACKUP_DIR_BASE="/root/simple-server-optimizer/backups"
 
 source "$MODULES_DIR/utils.sh"
 
-VERSION="${SSO_VERSION:-1.0.1}"
+VERSION="${SSO_VERSION:-1.0.0}"
 REPO_URL="https://github.com/ach1992/simple-server-optimizer"
 
 require_root
@@ -82,18 +82,20 @@ menu_firewall() {
     echo "1) Import blocklist from assets -> state (dedupe)"
     echo "2) Apply blocklist (DEFAULT: INPUT+OUTPUT)"
     echo "3) Remove/Disable SSO firewall rules (rollback firewall only)"
-    echo "4) Whitelist manager (add/remove/show)"
-    echo "5) Status (counts + active backend)"
-    echo "6) Block BitTorrent traffic (ports + common tracker ports)"
+    echo "4) Blacklist manager (add/remove/show)"
+    echo "5) Whitelist manager (add/remove/show)"
+    echo "6) Status (counts + active backend)"
+    echo "7) Block BitTorrent traffic (ports + common tracker ports)"
     echo "0) Back"
     choice="$(prompt_choice)"
     case "$choice" in
       1) module_firewall_import_blocklist ;;
       2) module_firewall_apply ;;
       3) module_firewall_disable ;;
-      4) module_firewall_whitelist_menu ;;
-      5) module_firewall_status ;;
-      6) module_firewall_bittorrent_menu ;;
+      4) module_firewall_blacklist_menu ;;
+      5) module_firewall_whitelist_menu ;;
+      6) module_firewall_status ;;
+      7) module_firewall_bittorrent_menu ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
