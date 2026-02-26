@@ -349,7 +349,11 @@ module_firewall_blacklist_menu() {
     case "$choice" in
       1)
         header; section "Blacklist"
-        nl -w2 -s') ' "$STATE_BLOCKLIST" || true
+        if [[ ! -f "$STATE_BLOCKLIST" ]] || [[ "$(wc -l < "$STATE_BLOCKLIST" | tr -d ' ')" == "0" ]]; then
+          info "Blacklist is empty."
+        else
+          nl -w2 -s') ' "$STATE_BLOCKLIST" || true
+        fi
         pause
         ;;
       2)
@@ -404,7 +408,11 @@ module_firewall_whitelist_menu() {
     case "$choice" in
       1)
         header; section "Whitelist"
-        nl -w2 -s') ' "$STATE_WHITELIST" || true
+        if [[ ! -f "$STATE_WHITELIST" ]] || [[ "$(wc -l < "$STATE_WHITELIST" | tr -d ' ')" == "0" ]]; then
+          info "Whitelist is empty."
+        else
+          nl -w2 -s') ' "$STATE_WHITELIST" || true
+        fi
         pause
         ;;
       2)
