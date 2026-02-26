@@ -314,22 +314,58 @@ module_firewall_disable() {
 
   firewall_persist_disable
 
+  # Try to remove rules from all supported backends.
+  # We VERIFY removal so we don't print success while nothing changed.
+
   if cmd_exists nft; then
-    nft delete table inet sso 2>/dev/null || true
+    if nft list table inet sso >/dev/null 2>&1; then
+      info "Removing nftables table: inet sso"
+      if ! nft flush table inet sso 2>&1 | sed 's/^/    /'; then
+        warn "nft flush failed (continuing)."
+      fi
+      if ! nft delete table inet sso 2>&1 | sed 's/^/    /'; then
+        warn "nft delete failed (continuing)."
+      fi
+
+      if nft list table inet sso >/dev/null 2>&1; then
+        err "nftables table inet sso is STILL present. Firewall rules may still be active."
+        err "Common causes: running without full privileges/capabilities, or another firewall manager immediately re-loading rules."
+        err "Try as root on the host (not an unprivileged container) and check: nft list ruleset | grep -n \"table inet sso\""
+      else
+        ok "nftables table inet sso removed."
+      fi
+    else
+      info "nftables table inet sso not found (nothing to remove)."
+    fi
   fi
+
   if cmd_exists iptables; then
-    iptables -D INPUT -j SSO_IN 2>/dev/null || true
+    info "Removing iptables chains/jumps (if present)"
+    # Remove jumps first (ignore errors if not present)
+    iptables -D INPUT  -j SSO_IN  2>/dev/null || true
     iptables -D OUTPUT -j SSO_OUT 2>/dev/null || true
-    iptables -F SSO_IN 2>/dev/null || true
+
+    # Flush & delete custom chains
+    iptables -F SSO_IN  2>/dev/null || true
     iptables -F SSO_OUT 2>/dev/null || true
-    iptables -X SSO_IN 2>/dev/null || true
+    iptables -X SSO_IN  2>/dev/null || true
     iptables -X SSO_OUT 2>/dev/null || true
+
+    # Verify
+    if iptables -S 2>/dev/null | grep -qE '(^-N SSO_IN|^-N SSO_OUT|SSO_IN|SSO_OUT)'; then
+      warn "Some iptables references to SSO chains still exist."
+    else
+      ok "iptables SSO chains removed (or were not present)."
+    fi
   fi
+
   if cmd_exists ipset; then
+    info "Removing ipset sets (if present)"
     ipset destroy sso_block_v4 2>/dev/null || true
     ipset destroy sso_white_v4 2>/dev/null || true
   fi
-  ok "SSO firewall disabled. (Backup: $d)"
+
+  ok "SSO firewall disable finished. (Backup: $d)"
   pause
 }
 
