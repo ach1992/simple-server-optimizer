@@ -22,7 +22,7 @@ ensure_default_whitelist() {
   fi
   # guarantee required default
   if ! grep -qx "10.235.0.0/19" "$STATE_WHITELIST" 2>/dev/null; then
-    echo "10.235.8.0/21" >> "$STATE_WHITELIST"
+    echo "10.235.0.0/19" >> "$STATE_WHITELIST"
   fi
   # dedupe
   awk 'NF && $0 !~ /^#/' "$STATE_WHITELIST" | sed 's/[[:space:]]//g' | sort -u > "$STATE_WHITELIST.tmp"
