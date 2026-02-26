@@ -21,7 +21,7 @@ ensure_default_whitelist() {
     cp -a "$ASSET_WHITEDEFAULT" "$STATE_WHITELIST"
   fi
   # guarantee required default
-  if ! grep -qx "10.235.8.0/21" "$STATE_WHITELIST" 2>/dev/null; then
+  if ! grep -qx "10.235.0.0/19" "$STATE_WHITELIST" 2>/dev/null; then
     echo "10.235.8.0/21" >> "$STATE_WHITELIST"
   fi
   # dedupe
