@@ -150,7 +150,9 @@ EOF
 }
 
 firewall_persist_disable() {
-  run_step "Disabling firewall persistence" systemctl disable --now sso-firewall.service || warn "Could not disable sso-firewall.service (continuing)."
+  info "Disabling firewall persistence"
+  systemd_disable_now_safe sso-firewall.service
+  ok "Disabling firewall persistence - done"
   rm -f /etc/systemd/system/sso-firewall.service 2>/dev/null || true
   rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
   run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."

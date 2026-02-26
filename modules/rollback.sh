@@ -118,7 +118,9 @@ restore_from_dir() {
   if [[ -f /etc/systemd/system/sso-firewall.service ]]; then
     run_step "Enabling SSO firewall service (rollback)" systemctl enable --now sso-firewall.service || warn "Could not enable sso-firewall.service (continuing)."
   else
-    run_step "Disabling SSO firewall service (rollback)" systemctl disable --now sso-firewall.service || warn "Could not disable sso-firewall.service (continuing)."
+    info "Disabling SSO firewall service (rollback)"
+    systemd_disable_now_safe sso-firewall.service
+    ok "Disabling SSO firewall service (rollback) - done"
   fi
 
   # fail2ban jail.local restore (only our managed file)

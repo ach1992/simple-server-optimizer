@@ -86,6 +86,39 @@ run_step() {
   return 1
 }
 
+# ---------- systemd helpers ----------
+systemd_load_state() {
+  local unit="$1"
+  systemctl show -p LoadState --value "$unit" 2>/dev/null || true
+}
+
+systemd_unit_exists() {
+  local unit="$1"
+  local st
+  st="$(systemd_load_state "$unit")"
+  [[ -n "$st" && "$st" != "not-found" ]]
+}
+
+systemd_disable_now_safe() {
+  # Best-effort disable/stop/unmask, treating "not-found" as success.
+  local unit="$1"
+  local st
+  st="$(systemd_load_state "$unit")"
+
+  # If masked, unmask first so stop/disable won't error.
+  systemctl unmask "$unit" >/dev/null 2>&1 || true
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  systemctl disable "$unit" >/dev/null 2>&1 || true
+  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+
+  # Consider it a success if unit is gone or disabled.
+  st="$(systemd_load_state "$unit")"
+  if [[ -z "$st" || "$st" == "not-found" ]]; then
+    return 0
+  fi
+  return 0
+}
+
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then

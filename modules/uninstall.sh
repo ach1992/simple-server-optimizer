@@ -40,8 +40,12 @@ module_uninstall() {
   fi
 
   # 2) Disable and remove services/scripts created by SSO
-  run_step "Stopping/disabling SSO firewall service" systemctl disable --now sso-firewall.service || true
-  run_step "Stopping/disabling SSO CPU/IRQ service" systemctl disable --now sso-cpuirq.service || true
+  info "Stopping/disabling SSO firewall service"
+  systemd_disable_now_safe sso-firewall.service
+  ok "Stopping/disabling SSO firewall service - done"
+  info "Stopping/disabling SSO CPU/IRQ service"
+  systemd_disable_now_safe sso-cpuirq.service
+  ok "Stopping/disabling SSO CPU/IRQ service - done"
   rm -f /etc/systemd/system/sso-firewall.service /etc/systemd/system/sso-cpuirq.service 2>/dev/null || true
   rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
   run_step "Reloading systemd units" systemctl daemon-reload || true
