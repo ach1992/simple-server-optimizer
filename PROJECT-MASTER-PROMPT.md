@@ -1,6 +1,8 @@
 # Simple Server Optimizer — Project Master Prompt
 
-This file is the canonical project-level specification for **Simple Server Optimizer (SSO)**. A new Master or maintainer should start here, then recover current execution truth from `README.md`, `AGENTS.md`, the relevant docs, open GitHub Issues/PRs, Git refs, and CI. Live GitHub/Git/CI state outranks stale status prose.
+This file is the **bootstrap source-of-intent** for **Simple Server Optimizer (SSO)**. Its job is to establish the durable project direction from which repository documentation, architecture rules, GitHub Issues, release work, and operating instructions are derived.
+
+It is **not** the normal recovery source for future Master sessions. After bootstrap is complete, routine recovery and execution must use the derived authoritative sources closest to the work: `README.md`, `AGENTS.md`, specialized docs, GitHub Issues/PRs, Git refs, CI, and release state. Re-read this file only when project-level intent, durable constraints, supported environments, non-goals, or completion criteria become materially unclear or are explicitly changed.
 
 ## Mission
 
@@ -138,7 +140,7 @@ Unless a later accepted Issue explicitly changes scope, SSO should not:
 - Firewall: SSO must manage explicitly namespaced tables/chains/sets and avoid assuming ownership of unrelated rules.
 - Fail2Ban: SSO should use an SSO-owned drop-in under `jail.d` rather than owning `/etc/fail2ban/jail.local`.
 
-See `docs/ARCHITECTURE.md` for implementation-oriented boundaries.
+These requirements are materialized into implementation-oriented documentation during bootstrap. After that, developers should use the specialized document that owns the relevant rule rather than repeatedly consulting this bootstrap prompt.
 
 ## Engineering and release rules
 
@@ -152,18 +154,21 @@ See `docs/ARCHITECTURE.md` for implementation-oriented boundaries.
 - Version with SemVer. Release source must correspond to an immutable reviewed commit/tag.
 - Production/user-server testing is a human operation unless explicitly delegated for a specific disposable target.
 
-## Master recovery spine
+## Bootstrap output model
 
-A replacement Master should recover in this order:
+This prompt should be used to establish and, when project-level intent changes, reconcile the repository's normal authoritative sources. Bootstrap is complete when the project direction above is represented in the appropriate stable docs and the executable work is represented in GitHub Issues/PRs.
 
-1. this file (`PROJECT-MASTER-PROMPT.md`);
-2. `README.md`, `AGENTS.md`, `docs/ARCHITECTURE.md`, and `docs/DEVELOPMENT.md`;
-3. the current parent/phase GitHub Issues and their dependencies;
-4. open PRs and their exact base/head/CI/review state;
-5. current `main` and relevant release/tag state;
-6. only then the source/tests required by the active work.
+After bootstrap:
 
-Do not restart planning from scratch because the chat/session changed. Current repository/GitHub/CI evidence is authoritative for mutable state.
+- `README.md` owns the user-facing product contract and supported usage;
+- `AGENTS.md` owns stable contributor/agent operating rules;
+- specialized `docs/*` files own architecture, development, testing, and release guidance;
+- GitHub Issues own unresolved work, priority, dependency, acceptance, and the active release plan;
+- Git/PRs own implementation identity and review history;
+- CI owns validation state;
+- tags/releases own published delivery identity.
+
+Do **not** put this file in the routine recovery checklist. A new Master should recover through those normal sources and only return here if project-level intent cannot otherwise be resolved or has been explicitly changed.
 
 ## Project success
 
