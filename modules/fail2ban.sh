@@ -38,7 +38,9 @@ ensure_fail2ban_installed() {
 fail2ban_collect_whitelist_ips() {
   [[ -f "${STATE_WHITELIST:-}" ]] || return 0
   awk '
-    NF && $0 !~ /^[[:space:]]*#/ {
+    {
+      gsub(/\r/, "", $0)
+      sub(/[[:space:]]*[#;].*$/, "", $0)
       gsub(/[[:space:]]/, "", $0)
       if ($0 != "") {
         if (printed) printf " "
@@ -149,7 +151,7 @@ module_fail2ban_install_ssh() {
   if ! ensure_fail2ban_installed; then
     err "Failed to install Fail2Ban."
     pause
-    return 1
+    return
   fi
 
   local enable_nginx=0
@@ -158,7 +160,7 @@ module_fail2ban_install_ssh() {
   if ! fail2ban_apply_managed_config "$enable_nginx" enable; then
     err "Fail2Ban configuration was not applied."
     pause
-    return 1
+    return
   fi
 
   ok "Fail2Ban enabled (sshd). SSO config: $F2B_SSO_LOCAL. Backup: $d"
@@ -174,13 +176,13 @@ module_fail2ban_enable_nginx() {
   if ! ensure_fail2ban_installed; then
     err "Fail2Ban not installed."
     pause
-    return 1
+    return
   fi
 
   if ! detect_nginx; then
     warn "nginx not detected. Skipping."
     pause
-    return 1
+    return
   fi
 
   ensure_dirs "$STATE_DIR"
@@ -194,7 +196,7 @@ module_fail2ban_enable_nginx() {
     fi
     err "nginx-http-auth jail was not applied."
     pause
-    return 1
+    return
   fi
 
   ok "nginx-http-auth jail enabled via $F2B_SSO_LOCAL. Backup: $d"
@@ -210,7 +212,7 @@ module_fail2ban_sync_whitelist() {
   if ! ensure_fail2ban_installed; then
     err "Fail2Ban not installed."
     pause
-    return 1
+    return
   fi
 
   ensure_default_whitelist
@@ -221,7 +223,7 @@ module_fail2ban_sync_whitelist() {
   if ! fail2ban_apply_managed_config "$enable_nginx"; then
     err "Whitelist was not applied to Fail2Ban."
     pause
-    return 1
+    return
   fi
 
   ok "Synced ignoreip via $F2B_SSO_LOCAL. Backup: $d"
@@ -265,7 +267,7 @@ module_fail2ban_rollback() {
   if ! run_step "Stopping Fail2Ban" systemctl stop fail2ban; then
     err "Could not stop Fail2Ban."
     pause
-    return 1
+    return
   fi
   ok "Fail2Ban stopped."
   pause
