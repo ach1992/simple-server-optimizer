@@ -13,6 +13,11 @@ detect_nginx() {
 ensure_fail2ban_installed() {
   if cmd_exists fail2ban-client; then return 0; fi
 
+  local package_was_installed=0
+  if dpkg -s fail2ban >/dev/null 2>&1; then
+    package_was_installed=1
+  fi
+
   if ! run_step "Updating package index" apt-get update -y; then
     return 1
   fi
@@ -25,7 +30,9 @@ ensure_fail2ban_installed() {
   fi
 
   ensure_dirs "$STATE_DIR"
-  touch "$STATE_DIR/installed_fail2ban.marker"
+  if [[ "$package_was_installed" == "0" ]]; then
+    touch "$STATE_DIR/installed_fail2ban.marker"
+  fi
 }
 
 fail2ban_collect_whitelist_ips() {
@@ -116,17 +123,21 @@ fail2ban_write_managed_config() {
 }
 
 fail2ban_apply_service() {
+  local service_mode="${1:-preserve}"
   if systemctl is-active --quiet fail2ban 2>/dev/null; then
     run_step "Restarting Fail2Ban" systemctl restart fail2ban
-  else
+  elif [[ "$service_mode" == "enable" ]]; then
     run_step "Enabling and starting Fail2Ban" systemctl enable --now fail2ban
+  else
+    info "Fail2Ban service is inactive; leaving its service state unchanged."
   fi
 }
 
 fail2ban_apply_managed_config() {
   local enable_nginx="${1:-0}"
+  local service_mode="${2:-preserve}"
   fail2ban_write_managed_config "$enable_nginx" || return 1
-  fail2ban_apply_service
+  fail2ban_apply_service "$service_mode"
 }
 
 module_fail2ban_install_ssh() {
@@ -144,7 +155,7 @@ module_fail2ban_install_ssh() {
   local enable_nginx=0
   [[ -f "$F2B_NGINX_MARKER" ]] && enable_nginx=1
 
-  if ! fail2ban_apply_managed_config "$enable_nginx"; then
+  if ! fail2ban_apply_managed_config "$enable_nginx" enable; then
     err "Fail2Ban configuration was not applied."
     pause
     return 1
