@@ -99,6 +99,7 @@ backup_is_usable_dir() {
   if [[ -f "$d/FORMAT" ]]; then
     format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
     [[ "$format" == "$SSO_BACKUP_FORMAT" ]] || return 1
+    [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
   fi
 
   return 0

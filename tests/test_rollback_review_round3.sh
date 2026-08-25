@@ -72,6 +72,7 @@ ambiguous_sso_bbr_history_is_not_promoted_or_replaced_by_current() {
 
   printf 'network:fq_bbr\n' > "$tmp/install/backups/20260102-000000/TAG"
   printf '2\n' > "$tmp/install/backups/20260102-000000/FORMAT"
+  : > "$tmp/install/backups/20260102-000000/COMPLETE"
   : > "$tmp/install/backups/20260102-000000/sysctl/bbr.conf.absent"
   : > "$tmp/install/backups/20260102-000000/sysctl/99-sso-qdisc.conf.absent"
   : > "$tmp/install/backups/20260102-000000/sysctl/99-sso-bbr.conf.absent"
@@ -100,6 +101,7 @@ fresh_first_bbr_operation_can_preserve_explicit_absence() {
   mkdir -p "$tmp/install/backups/20260102-000000/sysctl"
   printf 'network:fq_bbr\n' > "$tmp/install/backups/20260102-000000/TAG"
   printf '2\n' > "$tmp/install/backups/20260102-000000/FORMAT"
+  : > "$tmp/install/backups/20260102-000000/COMPLETE"
   : > "$tmp/install/backups/20260102-000000/sysctl/bbr.conf.absent"
   : > "$tmp/install/backups/20260102-000000/sysctl/99-sso-qdisc.conf.absent"
   : > "$tmp/install/backups/20260102-000000/sysctl/99-sso-bbr.conf.absent"
@@ -120,7 +122,58 @@ fresh_first_bbr_operation_can_preserve_explicit_absence() {
   return "$rc"
 }
 
+markerless_v2_residue_needs_positive_complete_marker() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p \
+    "$tmp/backups/20260101-legacy" \
+    "$tmp/backups/20260102-complete" \
+    "$tmp/backups/20260103-residue" \
+    "$tmp/backups/20260104-symlink"
+
+  printf 'legacy:test\n' > "$tmp/backups/20260101-legacy/TAG"
+
+  printf 'test:complete\n' > "$tmp/backups/20260102-complete/TAG"
+  printf '2\n' > "$tmp/backups/20260102-complete/FORMAT"
+  : > "$tmp/backups/20260102-complete/COMPLETE"
+
+  printf 'test:residue\n' > "$tmp/backups/20260103-residue/TAG"
+  printf '2\n' > "$tmp/backups/20260103-residue/FORMAT"
+
+  printf 'test:symlink\n' > "$tmp/backups/20260104-symlink/TAG"
+  printf '2\n' > "$tmp/backups/20260104-symlink/FORMAT"
+  : > "$tmp/sentinel"
+  ln -s "$tmp/sentinel" "$tmp/backups/20260104-symlink/COMPLETE"
+
+  (
+    set -Eeuo pipefail
+    STATE_DIR="$tmp/state"
+    BACKUP_DIR_BASE="$tmp/backups"
+    SSO_DIR="$tmp/install"
+    source "$ROLLBACK_SOURCE"
+    err() { :; }
+
+    backup_is_usable_dir "$BACKUP_DIR_BASE/20260101-legacy"
+    backup_is_usable_dir "$BACKUP_DIR_BASE/20260102-complete"
+    if backup_is_usable_dir "$BACKUP_DIR_BASE/20260103-residue"; then exit 1; fi
+    if backup_is_usable_dir "$BACKUP_DIR_BASE/20260104-symlink"; then exit 1; fi
+
+    local listed
+    listed="$(backup_list_names "$BACKUP_DIR_BASE")"
+    printf '%s\n' "$listed" | grep -Fxq '20260101-legacy'
+    printf '%s\n' "$listed" | grep -Fxq '20260102-complete'
+    if printf '%s\n' "$listed" | grep -Fxq '20260103-residue'; then exit 1; fi
+    if printf '%s\n' "$listed" | grep -Fxq '20260104-symlink'; then exit 1; fi
+    [[ "$(backup_last_dir)" == "$BACKUP_DIR_BASE/20260102-complete" ]]
+    if restore_from_dir "$BACKUP_DIR_BASE/20260103-residue" >/dev/null 2>&1; then exit 1; fi
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "certification failure remains quarantined without unsafe cleanup" certification_read_failure_stays_quarantined_if_cleanup_fails
 run_test "ambiguous tcp_bbr legacy history is never promoted or replaced by current fallback" ambiguous_sso_bbr_history_is_not_promoted_or_replaced_by_current
 run_test "fresh first BBR operation preserves explicit shared-file absence" fresh_first_bbr_operation_can_preserve_explicit_absence
+run_test "FORMAT=2 selectors require a positive non-symlink COMPLETE marker" markerless_v2_residue_needs_positive_complete_marker
 finish_tests

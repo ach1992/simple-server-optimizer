@@ -149,6 +149,7 @@ resource_tag_baseline_survives_legacy_to_v2_upgrade() {
   printf 'operator-before\n' > "$tmp/backups/20260101-000000/sysctl/bbr.conf"
   printf 'network:fq_bbr\n' > "$tmp/backups/20260102-000000/TAG"
   printf '2\n' > "$tmp/backups/20260102-000000/FORMAT"
+  : > "$tmp/backups/20260102-000000/COMPLETE"
   printf 'sso-modified\n' > "$tmp/backups/20260102-000000/sysctl/bbr.conf"
   (
     set -Eeuo pipefail

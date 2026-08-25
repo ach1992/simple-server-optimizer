@@ -86,6 +86,7 @@ durable_bbr_baseline_survives_online_install_relocation() {
   printf 'operator-before\n' > "$tmp/install.bak/backups/20260101-000000/sysctl/bbr.conf"
   printf 'network:fq_bbr\n' > "$tmp/install/backups/20260102-000000/TAG"
   printf '2\n' > "$tmp/install/backups/20260102-000000/FORMAT"
+  : > "$tmp/install/backups/20260102-000000/COMPLETE"
   printf 'sso-modified\n' > "$tmp/install/backups/20260102-000000/sysctl/bbr.conf"
   printf 'net.core.default_qdisc=fq\n' > "$tmp/install/backups/20260102-000000/sysctl/99-sso-qdisc.conf"
 
@@ -120,6 +121,7 @@ active_backup_is_not_invented_as_ownership_baseline() {
   mkdir -p "$tmp/install/backups/20260102-000000/sysctl"
   printf 'network:fq_bbr\n' > "$tmp/install/backups/20260102-000000/TAG"
   printf '2\n' > "$tmp/install/backups/20260102-000000/FORMAT"
+  : > "$tmp/install/backups/20260102-000000/COMPLETE"
   printf 'sso-modified\n' > "$tmp/install/backups/20260102-000000/sysctl/bbr.conf"
   printf 'net.core.default_qdisc=fq\n' > "$tmp/install/backups/20260102-000000/sysctl/99-sso-qdisc.conf"
   (
