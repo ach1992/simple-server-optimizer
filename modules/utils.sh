@@ -225,3 +225,15 @@ is_ipv4_cidr() {
   (( mask >= 0 && mask <= 32 )) || return 1
   return 0
 }
+
+validate_ipv4_or_cidr() {
+  local v="${1:-}"
+  [[ -n "$v" ]] || return 1
+  # reject anything with spaces
+  [[ "$v" == "${v//[[:space:]]/}" ]] || return 1
+  if [[ "$v" == */* ]]; then
+    is_ipv4_cidr "$v"
+  else
+    is_ipv4 "$v"
+  fi
+}
