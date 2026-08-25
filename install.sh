@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_SLUG="ach1992/simple-server-optimizer"
-BRANCH="main"
-INSTALL_DIR="/root/simple-server-optimizer"
+REPO_SLUG="${SSO_REPO_SLUG:-ach1992/simple-server-optimizer}"
+INSTALL_DIR="${SSO_INSTALL_DIR:-/root/simple-server-optimizer}"
+STATE_DIR="${SSO_STATE_DIR:-/etc/sso}"
+LAUNCHER_PATH="${SSO_LAUNCHER_PATH:-/usr/local/bin/sso}"
+SOURCE_PATH="${BASH_SOURCE[0]:-${0:-}}"
+if [[ -n "$SOURCE_PATH" && -f "$SOURCE_PATH" ]]; then
+  SOURCE_DIR="$(cd -- "$(dirname -- "$SOURCE_PATH")" && pwd)"
+else
+  SOURCE_DIR="$PWD"
+fi
 
-# ---------- colors ----------
+PAYLOAD_FILES=(
+  install.sh
+  sso.sh
+  modules/utils.sh
+  modules/network.sh
+  modules/cpu_irq.sh
+  modules/firewall.sh
+  modules/fail2ban.sh
+  modules/rollback.sh
+  modules/uninstall.sh
+  assets/whitelist-default.ipv4
+  assets/blocklist-ip.ipv4
+)
+
 c_reset="\033[0m"
 c_red="\033[31m"
 c_grn="\033[32m"
@@ -13,12 +33,11 @@ c_ylw="\033[33m"
 c_cyn="\033[36m"
 
 say() { printf "%b\n" "$*"; }
-err() { say "${c_red}[!]${c_reset} $*"; }
+err() { say "${c_red}[!]${c_reset} $*" >&2; }
 ok()  { say "${c_grn}[+]${c_reset} $*"; }
 info(){ say "${c_cyn}[*]${c_reset} $*"; }
-warn(){ say "${c_ylw}[!]${c_reset} $*"; }
+warn(){ say "${c_ylw}[!]${c_reset} $*" >&2; }
 
-# Run a command while showing progress + colored success/failure.
 run_step() {
   local msg="$1"; shift
   info "$msg"
@@ -30,7 +49,6 @@ run_step() {
   return 1
 }
 
-# Read from TTY even if script is started via pipe (e.g. curl | bash)
 read_input() {
   local prompt="${1:-}"
   local -n __out="$2"
@@ -49,135 +67,472 @@ need_root() {
   fi
 }
 
+validate_runtime_paths() {
+  local p
+  for p in "$INSTALL_DIR" "$STATE_DIR" "$LAUNCHER_PATH"; do
+    [[ "$p" == /* && "$p" != *$'\n'* ]] || {
+      err "SSO paths must be absolute single-line paths: $p"
+      return 1
+    }
+  done
+
+  case "$INSTALL_DIR" in
+    /|/root|/home|/etc|/usr|/var|/tmp|/opt|/srv)
+      err "Refusing unsafe install directory: $INSTALL_DIR"
+      return 1
+      ;;
+  esac
+}
+
 ensure_tools() {
-  if command -v curl >/dev/null 2>&1; then return 0; fi
-  warn "curl not found. Installing..."
-  run_step "Updating package index" apt-get update -y || true
-  run_step "Installing curl + CA certs" apt-get install -y curl ca-certificates || true
-  command -v curl >/dev/null 2>&1 || { err "curl install failed."; exit 1; }
+  if command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+    return 0
+  fi
+
+  warn "curl/sha256sum are required. Installing curl, CA certificates, and coreutils..."
+  run_step "Updating package index" apt-get update -y || return 1
+  run_step "Installing download/integrity tools" apt-get install -y curl ca-certificates coreutils || return 1
+  command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1
 }
 
-has_offline_payload() {
-  [[ -f "$INSTALL_DIR/sso.sh" ]] && [[ -d "$INSTALL_DIR/modules" ]] && [[ -d "$INSTALL_DIR/assets" ]]
+has_payload() {
+  local root="$1"
+  local f
+  for f in "${PAYLOAD_FILES[@]}"; do
+    [[ -s "$root/$f" ]] || return 1
+  done
 }
 
-download_online() {
-  ensure_tools
-  mkdir -p "$INSTALL_DIR"
+has_local_payload() {
+  has_payload "$SOURCE_DIR"
+}
 
-  local base="https://raw.githubusercontent.com/${REPO_SLUG}/${BRANCH}"
-
-  info "Downloading latest SSO from GitHub (online)..."
-
-  local tmp
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp" 2>/dev/null || true' RETURN
-
-  mkdir -p "$tmp/modules" "$tmp/assets"
-
-  curl_fetch() {
-    local url="$1"
-    local out="$2"
-    # retry helps on flaky networks
-    curl -fL --retry 5 --retry-delay 1 --retry-all-errors -sS "$url" -o "$out"
-    [[ -s "$out" ]] || { err "Downloaded file is empty: $url"; return 1; }
+validate_payload() {
+  local root="$1"
+  has_payload "$root" || {
+    err "Payload is incomplete: $root"
+    return 1
   }
 
-  run_step "Downloading sso.sh" curl_fetch "${base}/sso.sh" "$tmp/sso.sh" || return 1
-  # basic sanity check
-  grep -q "^#!/" "$tmp/sso.sh" || { err "Downloaded sso.sh looks invalid."; return 1; }
+  grep -q '^#!/usr/bin/env bash' "$root/install.sh" || {
+    err "install.sh has an unexpected header."
+    return 1
+  }
+  grep -q '^#!/usr/bin/env bash' "$root/sso.sh" || {
+    err "sso.sh has an unexpected header."
+    return 1
+  }
 
-  # ✅ FIX: download install.sh from the correct path (repo root).
-  # If it fails for any reason, fallback to copying the currently running installer (if available).
-  if ! run_step "Downloading install.sh" curl_fetch "${base}/install.sh" "$tmp/install.sh"; then
-    warn "Could not download install.sh from GitHub; trying to save the running installer as fallback..."
-    if [[ -n "${0:-}" && -f "${0}" ]]; then
-      cp -a "${0}" "$tmp/install.sh" || { err "Fallback copy of install.sh failed."; return 1; }
-      ok "Fallback: saved running installer as install.sh - done"
-    else
-      err "Fallback failed: cannot locate running installer path."
+  local scripts=("$root/install.sh" "$root/sso.sh")
+  local f
+  for f in "$root"/modules/*.sh; do
+    scripts+=("$f")
+  done
+  bash -n "${scripts[@]}"
+}
+
+curl_fetch() {
+  local url="$1"
+  local out="$2"
+  # Keep options compatible with Debian 10's curl 7.64.x.
+  curl -fL --retry 5 --retry-delay 1 -sS "$url" -o "$out"
+  [[ -s "$out" ]] || {
+    err "Downloaded file is empty: $url"
+    return 1
+  }
+}
+
+validate_release_ref() {
+  local ref="$1"
+  [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+}
+
+resolve_release_ref() {
+  if [[ -n "${SSO_RELEASE_REF:-}" ]]; then
+    validate_release_ref "$SSO_RELEASE_REF" || {
+      err "Invalid release ref: $SSO_RELEASE_REF"
+      return 1
+    }
+    printf '%s\n' "$SSO_RELEASE_REF"
+    return 0
+  fi
+
+  ensure_tools || return 1
+  local effective=""
+  effective="$(curl -fLsS --retry 3 --retry-delay 1 -o /dev/null -w '%{url_effective}' \
+    "https://github.com/${REPO_SLUG}/releases/latest")" || return 1
+
+  local ref="${effective##*/}"
+  validate_release_ref "$ref" || {
+    err "No valid published SSO release could be resolved."
+    return 1
+  }
+  printf '%s\n' "$ref"
+}
+
+github_api_get() {
+  local url="$1"
+  curl -fLsS --retry 3 --retry-delay 1 \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$url"
+}
+
+json_last_sha() {
+  grep -Eo '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | tail -n1 | grep -Eo '[0-9a-f]{40}'
+}
+
+json_last_type() {
+  grep -Eo '"type"[[:space:]]*:[[:space:]]*"(commit|tag)"' | tail -n1 | sed -E 's/.*"(commit|tag)"/\1/'
+}
+
+resolve_tag_commit_sha() {
+  local ref="$1"
+  validate_release_ref "$ref" || return 1
+
+  local json type sha depth=0
+  json="$(github_api_get "https://api.github.com/repos/${REPO_SLUG}/git/ref/tags/${ref}")" || return 1
+  type="$(printf '%s\n' "$json" | json_last_type)"
+  sha="$(printf '%s\n' "$json" | json_last_sha)"
+
+  while [[ "$type" == "tag" && "$depth" -lt 5 ]]; do
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+    json="$(github_api_get "https://api.github.com/repos/${REPO_SLUG}/git/tags/${sha}")" || return 1
+    type="$(printf '%s\n' "$json" | json_last_type)"
+    sha="$(printf '%s\n' "$json" | json_last_sha)"
+    depth=$((depth + 1))
+  done
+
+  [[ "$type" == "commit" && "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+    err "Release tag did not resolve to a commit SHA."
+    return 1
+  }
+  printf '%s\n' "$sha"
+}
+
+verify_release_manifest() {
+  local root="$1"
+  local manifest="$root/release/SHA256SUMS"
+  [[ -s "$manifest" ]] || {
+    err "Release checksum manifest is missing."
+    return 1
+  }
+
+  local expected actual
+  expected="$(mktemp)" || return 1
+  actual="$(mktemp)" || {
+    rm -f "$expected"
+    return 1
+  }
+
+  printf '%s\n' "${PAYLOAD_FILES[@]}" | LC_ALL=C sort > "$expected"
+
+  if ! awk '
+    NF == 0 { next }
+    NF != 2 { exit 2 }
+    $1 !~ /^[0-9a-fA-F]{64}$/ { exit 3 }
+    {
+      path=$2
+      sub(/^\*/, "", path)
+      if (path ~ /^\// || path ~ /(^|\/)\.\.($|\/)/) exit 4
+      print path
+    }
+  ' "$manifest" | LC_ALL=C sort > "$actual"; then
+    rm -f "$expected" "$actual"
+    err "Release checksum manifest has an invalid format."
+    return 1
+  fi
+
+  if ! cmp -s "$expected" "$actual"; then
+    rm -f "$expected" "$actual"
+    err "Release checksum manifest does not describe the exact SSO payload."
+    return 1
+  fi
+  rm -f "$expected" "$actual"
+
+  if ! (cd "$root" && sha256sum -c release/SHA256SUMS >/dev/null); then
+    err "Release checksum verification failed."
+    return 1
+  fi
+}
+
+download_release_payload() {
+  local ref="$1"
+  local target="$2"
+  local base="https://raw.githubusercontent.com/${REPO_SLUG}/${ref}"
+
+  mkdir -p "$target/release" || return 1
+  run_step "Downloading release checksum manifest" \
+    curl_fetch "${base}/release/SHA256SUMS" "$target/release/SHA256SUMS" || return 1
+
+  local f
+  for f in "${PAYLOAD_FILES[@]}"; do
+    mkdir -p "$target/$(dirname "$f")" || return 1
+    run_step "Downloading ${f}" curl_fetch "${base}/${f}" "$target/$f" || return 1
+  done
+
+  info "Verifying release checksums..."
+  verify_release_manifest "$target" || return 1
+  ok "Release checksums verified."
+
+  validate_payload "$target"
+}
+
+stage_local_payload() {
+  local source="$1"
+  local target="$2"
+  has_payload "$source" || {
+    err "Local payload is incomplete: $source"
+    return 1
+  }
+
+  local f
+  for f in "${PAYLOAD_FILES[@]}"; do
+    mkdir -p "$target/$(dirname "$f")" || return 1
+    cp -a "$source/$f" "$target/$f" || return 1
+  done
+  validate_payload "$target"
+}
+
+rollback_install_activation() {
+  local had_current="$1"
+  local backup="$2"
+
+  rm -rf "$INSTALL_DIR"
+  if [[ "$had_current" == "1" && -d "$backup" ]]; then
+    mv "$backup" "$INSTALL_DIR" || {
+      err "Automatic installation rollback failed. Previous install remains at: $backup"
+      return 1
+    }
+  fi
+}
+
+install_staged_payload() {
+  local stage="$1"
+  validate_runtime_paths || return 1
+  validate_payload "$stage" || return 1
+
+  local parent new backup had_current=0
+  parent="$(dirname "$INSTALL_DIR")"
+  mkdir -p "$parent" "$STATE_DIR" || {
+    err "Could not prepare installation/state directories."
+    return 1
+  }
+  new="$(mktemp -d "${INSTALL_DIR}.new.XXXXXX")" || {
+    err "Could not create a staging directory beside $INSTALL_DIR"
+    return 1
+  }
+  backup="${INSTALL_DIR}.bak"
+
+  local f
+  for f in "${PAYLOAD_FILES[@]}"; do
+    if ! mkdir -p "$new/$(dirname "$f")" || ! cp -a "$stage/$f" "$new/$f"; then
+      rm -rf "$new"
+      err "Could not stage payload file: $f"
+      return 1
+    fi
+  done
+
+  if ! chmod +x "$new/install.sh" "$new/sso.sh" || ! validate_payload "$new"; then
+    rm -rf "$new"
+    err "Staged installation failed validation."
+    return 1
+  fi
+
+  if [[ -d "$INSTALL_DIR" ]]; then
+    had_current=1
+    if ! rm -rf "$backup"; then
+      rm -rf "$new"
+      err "Could not rotate the previous installation backup."
+      return 1
+    fi
+    if ! mv "$INSTALL_DIR" "$backup"; then
+      rm -rf "$new"
+      err "Could not preserve the current installation."
       return 1
     fi
   fi
 
-  # modules
-  for f in utils.sh network.sh cpu_irq.sh firewall.sh fail2ban.sh rollback.sh uninstall.sh; do
-    run_step "Downloading modules/${f}" curl_fetch "${base}/modules/${f}" "$tmp/modules/${f}" || return 1
-  done
+  if ! mv "$new" "$INSTALL_DIR"; then
+    err "Could not activate the staged installation."
+    rm -rf "$new"
+    if [[ "$had_current" == "1" && -d "$backup" && ! -e "$INSTALL_DIR" ]]; then
+      mv "$backup" "$INSTALL_DIR" || true
+    fi
+    return 1
+  fi
 
-  run_step "Downloading whitelist-default.ipv4" curl_fetch "${base}/assets/whitelist-default.ipv4" "$tmp/assets/whitelist-default.ipv4" || return 1
-  # blocklist in repo may be optional; don't fail if missing
-  curl -fL -sS "${base}/assets/blocklist-ip.ipv4" -o "$tmp/assets/blocklist-ip.ipv4" >/dev/null 2>&1 || true
+  local state_tmp
+  if ! state_tmp="$(mktemp "$STATE_DIR/.install_dir.XXXXXX")"; then
+    err "Could not create installation-state staging file; restoring the previous installation."
+    rollback_install_activation "$had_current" "$backup" || true
+    return 1
+  fi
+  if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp" || ! mv -f "$state_tmp" "$STATE_DIR/install_dir"; then
+    rm -f "$state_tmp"
+    err "Could not persist the installation path; restoring the previous installation."
+    rollback_install_activation "$had_current" "$backup" || true
+    return 1
+  fi
 
-  # atomically replace install dir content
-  rm -rf "$INSTALL_DIR.bak" 2>/dev/null || true
-  [[ -d "$INSTALL_DIR" ]] && mv "$INSTALL_DIR" "$INSTALL_DIR.bak" 2>/dev/null || true
-  mkdir -p "$INSTALL_DIR"
-  cp -a "$tmp/sso.sh" "$INSTALL_DIR/sso.sh"
-  cp -a "$tmp/install.sh" "$INSTALL_DIR/install.sh"
-  mkdir -p "$INSTALL_DIR/modules" "$INSTALL_DIR/assets"
-  cp -a "$tmp/modules/." "$INSTALL_DIR/modules/"
-  cp -a "$tmp/assets/." "$INSTALL_DIR/assets/"
+  ok "Installed SSO to $INSTALL_DIR"
+  if [[ "$had_current" == "1" ]]; then
+    info "Previous installation preserved at: $backup"
+  fi
+}
 
-  run_step "Setting executable bit" chmod +x "$INSTALL_DIR/sso.sh" "$INSTALL_DIR/install.sh" || true
+install_local() {
+  local tmp rc
+  tmp="$(mktemp -d)" || {
+    err "Could not create local staging directory."
+    return 1
+  }
+  info "Staging local payload from: $SOURCE_DIR"
+  if stage_local_payload "$SOURCE_DIR" "$tmp" && install_staged_payload "$tmp"; then
+    rc=0
+  else
+    rc=1
+  fi
+  rm -rf "$tmp"
+  return "$rc"
+}
 
-  # store install dir for persistence scripts
-  mkdir -p /etc/sso
-  echo "$INSTALL_DIR" > /etc/sso/install_dir 2>/dev/null || true
+download_online() {
+  ensure_tools || {
+    err "Required download/integrity tools are unavailable."
+    return 1
+  }
 
-  ok "Online download complete."
-  warn "NOTE: Put your blocklist at: $INSTALL_DIR/assets/blocklist-ip.ipv4 (offline/managed) or keep it in repo."
+  local ref commit_sha
+  if ! ref="$(resolve_release_ref)"; then
+    err "No published release is available. Use a complete local checkout until a release is published."
+    return 1
+  fi
+  if ! commit_sha="$(resolve_tag_commit_sha "$ref")"; then
+    err "Could not pin release $ref to an immutable commit SHA."
+    return 1
+  fi
+
+  info "Resolved release: $ref @ $commit_sha"
+  local tmp rc
+  tmp="$(mktemp -d)" || {
+    err "Could not create release staging directory."
+    return 1
+  }
+  if download_release_payload "$commit_sha" "$tmp" && install_staged_payload "$tmp"; then
+    rc=0
+  else
+    rc=1
+  fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+create_launcher() {
+  validate_runtime_paths || return 1
+  [[ -f "$INSTALL_DIR/sso.sh" ]] || return 1
+  mkdir -p "$(dirname "$LAUNCHER_PATH")" || return 1
+  if ! cat > "$LAUNCHER_PATH" <<LAUNCHER_SCRIPT
+#!/usr/bin/env bash
+set -Eeuo pipefail
+INSTALL_DIR_FILE="$STATE_DIR/install_dir"
+FALLBACK_INSTALL_DIR="$INSTALL_DIR"
+if [[ -r "\$INSTALL_DIR_FILE" ]]; then
+  INSTALL_DIR="\$(cat "\$INSTALL_DIR_FILE")"
+else
+  INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+fi
+[[ -n "\$INSTALL_DIR" ]] || INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+exec bash "\${INSTALL_DIR}/sso.sh" "\$@"
+LAUNCHER_SCRIPT
+  then
+    return 1
+  fi
+  chmod +x "$LAUNCHER_PATH"
 }
 
 run_sso() {
   exec bash "$INSTALL_DIR/sso.sh"
 }
 
-create_launcher() {
-  # Create a simple command to run SSO without re-installing
-  local target="$INSTALL_DIR/sso.sh"
-  if [[ ! -f "$target" ]]; then
-    return 0
-  fi
-  tee /usr/local/bin/sso >/dev/null <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-INSTALL_DIR_FILE="/etc/sso/install_dir"
-if [[ -r "$INSTALL_DIR_FILE" ]]; then
-  INSTALL_DIR="$(cat "$INSTALL_DIR_FILE" 2>/dev/null || true)"
-else
-  INSTALL_DIR="/root/simple-server-optimizer"
-fi
-exec bash "${INSTALL_DIR}/sso.sh" "$@"
-EOF
-  chmod +x /usr/local/bin/sso 2>/dev/null || true
+finish_install() {
+  create_launcher || {
+    err "Failed to create the SSO launcher."
+    return 1
+  }
+  run_sso
 }
 
 menu() {
-  if has_offline_payload; then
+  local mode="${1:-auto}"
+
+  case "$mode" in
+    local)
+      has_local_payload || {
+        err "No complete local payload found in $SOURCE_DIR"
+        return 1
+      }
+      install_local
+      finish_install
+      return
+      ;;
+    online)
+      download_online
+      finish_install
+      return
+      ;;
+    auto) ;;
+    *) err "Unknown install mode: $mode"; return 1 ;;
+  esac
+
+  if has_local_payload; then
     say ""
     say "${c_cyn}Simple Server Optimizer - Installer${c_reset}"
+    say "Local source: $SOURCE_DIR"
     say "Install dir: $INSTALL_DIR"
     say ""
-    say "${c_grn}[+]${c_reset} Offline payload detected."
-    say "1) Use OFFLINE (local files)"
-    say "2) Use ONLINE  (download latest from GitHub)"
+    say "${c_grn}[+]${c_reset} Complete local payload detected."
+    say "1) Install LOCAL payload"
+    say "2) Install latest VERIFIED RELEASE"
     say "0) Exit"
     local choice=""
     read_input "Select an option: " choice
     case "${choice:-}" in
-      1) create_launcher; run_sso ;;
-      2) download_online; create_launcher; run_sso ;;
+      1) install_local; finish_install ;;
+      2) download_online; finish_install ;;
       0) exit 0 ;;
       *) err "Invalid choice."; exit 1 ;;
     esac
   else
-    info "No offline payload found in $INSTALL_DIR → installing ONLINE..."
+    info "No complete local payload found in $SOURCE_DIR. Installing latest verified release..."
     download_online
-    create_launcher
-    run_sso
+    finish_install
   fi
 }
 
-need_root
-menu
+main() {
+  local mode="auto"
+  case "${1:-}" in
+    "") ;;
+    --local) mode="local" ;;
+    --online) mode="online" ;;
+    -h|--help)
+      cat <<'HELP'
+Usage: install.sh [--local|--online]
+
+  --local   install only from the complete payload beside this installer
+  --online  resolve the latest published GitHub Release and verify SHA256SUMS
+HELP
+      return 0
+      ;;
+    *) err "Unknown option: $1"; return 1 ;;
+  esac
+
+  validate_runtime_paths || return 1
+  need_root
+  menu "$mode"
+}
+
+if [[ "${SSO_INSTALL_LIB_ONLY:-0}" != "1" ]]; then
+  main "$@"
+fi
