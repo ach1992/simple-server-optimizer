@@ -463,7 +463,7 @@ remove_sso_firewall_runtime() {
       return 1
     fi
     for family in inet ip; do
-      if printf '%s\n' "$out" | grep -Eq "^[[:space:]]*table[[:space:]]+$family[[:space:]]+sso([[:space:]]|$)"; then
+      if printf '%s\n' "$out" | grep -Eq "^[[:space:]]*table[[:space:]]+${family}[[:space:]]+sso([[:space:]]|$)"; then
         nft flush table "$family" sso >/dev/null 2>&1 || return 1
         nft delete table "$family" sso >/dev/null 2>&1 || return 1
       fi
