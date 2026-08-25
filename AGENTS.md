@@ -2,17 +2,20 @@
 
 These instructions apply to the entire repository.
 
-## Start here
+## Routine recovery and work entry
 
-Before substantive work, read:
+For normal development or a replacement Master, recover current truth from the sources closest to the work:
 
-1. `PROJECT-MASTER-PROMPT.md` for durable project intent and delivery sequence;
-2. `README.md` for supported user-facing behavior;
-3. `docs/ARCHITECTURE.md` for ownership/state boundaries;
-4. `docs/DEVELOPMENT.md` for validation and release workflow;
-5. the current GitHub Issue/PR that owns the work.
+1. `README.md` for supported user-facing behavior and project navigation;
+2. this file for stable contributor/agent rules;
+3. the relevant specialized docs such as `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md`;
+4. the current GitHub Issue/PR that owns the work, including dependencies and acceptance;
+5. current Git refs, CI/checks, and release/tag state;
+6. only then the source/tests required by the active work.
 
 Current Git/GitHub/CI evidence is authoritative for mutable state. Do not reconstruct current status from old chat summaries.
+
+`PROJECT-MASTER-PROMPT.md` is a bootstrap source-of-intent, not part of the routine recovery path. Read it only when project-level intent, durable constraints, supported environments, non-goals, or completion criteria are materially unclear or explicitly changing.
 
 ## Engineering rules
 
