@@ -1,4 +1,4 @@
-# Simple Server Optimizer — Project Master Prompt
+# Simple Server Optimizer — Project Specification
 
 This file is the **bootstrap source-of-intent** for **Simple Server Optimizer (SSO)**. Its job is to establish the durable project direction from which repository documentation, architecture rules, GitHub Issues, release work, and operating instructions are derived.
 
@@ -140,7 +140,7 @@ Unless a later accepted Issue explicitly changes scope, SSO should not:
 - Firewall: SSO must manage explicitly namespaced tables/chains/sets and avoid assuming ownership of unrelated rules.
 - Fail2Ban: SSO should use an SSO-owned drop-in under `jail.d` rather than owning `/etc/fail2ban/jail.local`.
 
-These requirements are materialized into implementation-oriented documentation during bootstrap. After that, developers should use the specialized document that owns the relevant rule rather than repeatedly consulting this bootstrap prompt.
+These requirements are materialized into implementation-oriented documentation during bootstrap. After that, developers should use the specialized document that owns the relevant rule rather than repeatedly consulting this project specification.
 
 ## Engineering and release rules
 
@@ -156,7 +156,7 @@ These requirements are materialized into implementation-oriented documentation d
 
 ## Bootstrap output model
 
-This prompt should be used to establish and, when project-level intent changes, reconcile the repository's normal authoritative sources. Bootstrap is complete when the project direction above is represented in the appropriate stable docs and the executable work is represented in GitHub Issues/PRs.
+This specification should be used to establish and, when project-level intent changes, reconcile the repository's normal authoritative sources. Bootstrap is complete when the project direction above is represented in the appropriate stable docs and the executable work is represented in GitHub Issues/PRs.
 
 After bootstrap:
 

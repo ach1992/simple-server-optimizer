@@ -250,7 +250,7 @@ Routine development/recovery should use the source closest to the question:
 - GitHub Issues — live roadmap, priorities, dependencies, acceptance, and release work;
 - Pull Requests / Git / CI — implementation and validation truth.
 
-`PROJECT-MASTER-PROMPT.md` is the bootstrap source used to establish project direction and these derived systems. It is not part of normal session recovery unless project-level intent itself becomes unclear or changes.
+`PROJECT-SPEC.md` is the bootstrap specification used to establish project direction and these derived systems. It is not part of normal session recovery unless project-level intent itself becomes unclear or changes.
 
 ---
 
