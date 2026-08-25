@@ -68,21 +68,50 @@ need_root() {
   fi
 }
 
+validate_absolute_runtime_path() {
+  local p="$1"
+  local canonical=""
+
+  [[ "$p" == /* && "$p" != *$'\n'* && "$p" != *$'\r'* ]] || return 1
+  command -v realpath >/dev/null 2>&1 || return 1
+  canonical="$(realpath -m -- "$p" 2>/dev/null)" || return 1
+  [[ "$p" == "$canonical" && "$p" != "/" ]]
+}
+
+path_is_within() {
+  local child="$1"
+  local parent="$2"
+  [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
+}
+
 validate_runtime_paths() {
   local p
   for p in "$INSTALL_DIR" "$STATE_DIR" "$LAUNCHER_PATH"; do
-    [[ "$p" == /* && "$p" != *$'\n'* ]] || {
-      err "SSO paths must be absolute single-line paths: $p"
+    validate_absolute_runtime_path "$p" || {
+      err "SSO paths must be canonical absolute paths without dot segments, aliases, or line breaks: $p"
       return 1
     }
+    case "$p" in
+      /root|/home|/etc|/usr|/var|/tmp|/opt|/srv)
+        err "Refusing unsafe broad runtime path: $p"
+        return 1
+        ;;
+    esac
   done
 
-  case "$INSTALL_DIR" in
-    /|/root|/home|/etc|/usr|/var|/tmp|/opt|/srv)
-      err "Refusing unsafe install directory: $INSTALL_DIR"
-      return 1
-      ;;
-  esac
+  local backup_dir="${INSTALL_DIR}.bak"
+  if path_is_within "$STATE_DIR" "$INSTALL_DIR" \
+    || path_is_within "$INSTALL_DIR" "$STATE_DIR" \
+    || path_is_within "$STATE_DIR" "$backup_dir"; then
+    err "State directory must remain independent of the replaceable installation and backup trees."
+    return 1
+  fi
+
+  if path_is_within "$LAUNCHER_PATH" "$INSTALL_DIR" \
+    || path_is_within "$LAUNCHER_PATH" "$backup_dir"; then
+    err "Launcher path must remain outside the replaceable installation and backup trees."
+    return 1
+  fi
 }
 
 ensure_tools() {
@@ -489,13 +518,13 @@ menu() {
         err "No complete local payload found in $SOURCE_DIR"
         return 1
       }
-      install_local
-      finish_install
+      install_local || return 1
+      finish_install || return 1
       return
       ;;
     online)
-      download_online
-      finish_install
+      download_online || return 1
+      finish_install || return 1
       return
       ;;
     auto) ;;
@@ -515,15 +544,15 @@ menu() {
     local choice=""
     read_input "Select an option: " choice
     case "${choice:-}" in
-      1) install_local; finish_install ;;
-      2) download_online; finish_install ;;
+      1) install_local || return 1; finish_install || return 1 ;;
+      2) download_online || return 1; finish_install || return 1 ;;
       0) exit 0 ;;
       *) err "Invalid choice."; exit 1 ;;
     esac
   else
     info "No complete local payload found in $SOURCE_DIR. Installing latest verified release..."
-    download_online
-    finish_install
+    download_online || return 1
+    finish_install || return 1
   fi
 }
 
