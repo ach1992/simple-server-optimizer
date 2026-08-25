@@ -27,18 +27,17 @@ section() { say "${c_bold}$*${c_reset}"; line; }
 read_input() {
   local prompt="${1:-}"
   local -n __out="$2"
+
   if [[ -n "$prompt" ]]; then
-    if [[ -w /dev/tty ]]; then
-      printf "%s" "$prompt" >/dev/tty
-    else
+    if ! printf "%s" "$prompt" >/dev/tty 2>/dev/null; then
       printf "%s" "$prompt" >&2
     fi
   fi
-  if [[ -r /dev/tty ]]; then
-    IFS= read -r __out </dev/tty || true
-  else
-    IFS= read -r __out || true
+
+  if IFS= read -r __out </dev/tty 2>/dev/null; then
+    return 0
   fi
+  IFS= read -r __out || true
 }
 
 pause() {
@@ -52,9 +51,7 @@ prompt_choice() {
   local ans=""
 
   while true; do
-    if [[ -w /dev/tty ]]; then
-      printf "\n" >/dev/tty
-    else
+    if ! printf "\n" >/dev/tty 2>/dev/null; then
       printf "\n" >&2
     fi
 
@@ -66,9 +63,7 @@ prompt_choice() {
       return 0
     fi
 
-    if [[ -w /dev/tty ]]; then
-      printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty
-    else
+    if ! printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty 2>/dev/null; then
       printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >&2
     fi
   done
