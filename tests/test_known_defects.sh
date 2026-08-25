@@ -2,7 +2,6 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/lib/testlib.sh
 source "$ROOT_DIR/tests/lib/testlib.sh"
 
 rollback_choose_uses_prompt_contract() {
@@ -38,9 +37,7 @@ backup_create_returns_only_path_on_stdout() {
   local captured
   captured="$(
     (
-      # shellcheck source=modules/utils.sh
       source "$ROOT_DIR/modules/utils.sh"
-      # shellcheck source=modules/rollback.sh
       source "$ROOT_DIR/modules/rollback.sh"
 
       BACKUP_DIR_BASE="$tmp"
@@ -52,7 +49,10 @@ backup_create_returns_only_path_on_stdout() {
       backup_capture_sysctl() { :; }
       backup_capture_qdisc() { :; }
       backup_capture_firewall() { :; }
+      backup_capture_cpu_irq() { :; }
+      backup_capture_state() { :; }
       backup_capture_fail2ban() { :; }
+      backup_capture_services() { :; }
       backup_mark() { :; }
 
       backup_create "test:contract"
@@ -67,6 +67,6 @@ backup_create_returns_only_path_on_stdout() {
   [[ "$captured" == "$expected" ]]
 }
 
-known_failure "rollback chooser follows prompt_choice output-variable contract" rollback_choose_uses_prompt_contract
-known_failure "backup_create stdout is a machine-readable path only" backup_create_returns_only_path_on_stdout
+run_test "rollback chooser follows prompt_choice output-variable contract" rollback_choose_uses_prompt_contract
+run_test "backup_create stdout is a machine-readable path only" backup_create_returns_only_path_on_stdout
 finish_tests
