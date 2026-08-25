@@ -157,6 +157,8 @@ Before integration, review the effective target-to-candidate diff for:
 
 Security-sensitive or high-blast-radius changes may require an independent reviewer context in addition to Master self-review.
 
+GitHub Copilot review must not be used for this repository. When an independent review is required, the Master must provide the owner with one ready-to-paste `INDEPENDENT REVIEW CHAT` prompt for a fresh independent chat/reviewer context. The review packet must bind the exact repository, PR/change, target/base SHA, candidate HEAD SHA, owning Issue/Contract Revision, review scope, risk, constraints, and current validation evidence. The returned review must identify the exact candidate SHA, give an `APPROVE` or `CHANGES_REQUIRED` verdict, and list concrete `BLOCKER`, `REQUIRED`, or `OPTIONAL` findings. Before relying on it, the Master must re-check that the candidate, target, contract, and effective diff have not materially drifted.
+
 ## 10. CI baseline
 
 CI should remain small and high-signal. At minimum it should run:
