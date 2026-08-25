@@ -258,6 +258,60 @@ test_finish_install_propagates_run_failure() {
   return "$rc"
 }
 
+generator_fixture() {
+  local root="$1"
+  local f
+  mkdir -p "$root/scripts"
+  cp -a "$ROOT_DIR/scripts/generate_release_manifest.sh" "$root/scripts/generate_release_manifest.sh"
+  for f in \
+    install.sh sso.sh \
+    modules/utils.sh modules/network.sh modules/cpu_irq.sh modules/firewall.sh \
+    modules/fail2ban.sh modules/rollback.sh modules/uninstall.sh \
+    assets/whitelist-default.ipv4 assets/blocklist-ip.ipv4; do
+    mkdir -p "$root/$(dirname "$f")"
+    printf 'fixture:%s\n' "$f" > "$root/$f"
+  done
+}
+
+test_manifest_generator_rejects_symlink_payload() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  generator_fixture "$tmp/repo"
+  printf 'external\n' > "$tmp/external"
+  rm -f "$tmp/repo/install.sh"
+  ln -s "$tmp/external" "$tmp/repo/install.sh"
+  if "$tmp/repo/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  [[ ! -e "$tmp/repo/release/SHA256SUMS" ]]
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_manifest_generator_failure_preserves_previous_manifest() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  generator_fixture "$tmp/repo"
+  mkdir -p "$tmp/repo/release" "$tmp/bin"
+  printf 'previous-manifest\n' > "$tmp/repo/release/SHA256SUMS"
+  cat > "$tmp/bin/sha256sum" <<'MOCK'
+#!/usr/bin/env bash
+printf 'partial-output\n'
+exit 76
+MOCK
+  chmod +x "$tmp/bin/sha256sum"
+  if PATH="$tmp/bin:$PATH" "$tmp/repo/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  [[ "$(cat "$tmp/repo/release/SHA256SUMS")" == 'previous-manifest' ]]
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "runtime paths are canonical and durable state/launcher stay outside replaceable trees" test_runtime_paths_are_canonical_and_persistence_is_independent
 run_test "finish_install runs only after successful install/download" test_finish_install_only_runs_after_success
 run_test "runtime payload and checksum manifest reject symlink metadata" test_payload_and_manifest_reject_symlinks
@@ -265,4 +319,6 @@ run_test "curl failure cannot be hidden by a partial nonempty output" test_faile
 run_test "activation failure restores the previous installation" test_activation_failure_restores_previous_installation
 run_test "rollback removal failure preserves the previous backup evidence" test_rollback_removal_failure_preserves_previous_backup
 run_test "finish_install propagates a failed SSO launch" test_finish_install_propagates_run_failure
+run_test "manifest generator rejects symlinked runtime payload" test_manifest_generator_rejects_symlink_payload
+run_test "manifest generation failure preserves the previous manifest" test_manifest_generator_failure_preserves_previous_manifest
 finish_tests

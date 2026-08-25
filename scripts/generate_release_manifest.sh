@@ -19,12 +19,26 @@ PAYLOAD_FILES=(
 )
 
 for f in "${PAYLOAD_FILES[@]}"; do
-  [[ -s "$f" ]] || {
-    printf 'Missing release payload file: %s\n' "$f" >&2
+  [[ -f "$f" && ! -L "$f" && -s "$f" ]] || {
+    printf 'Missing or unsafe release payload file: %s\n' "$f" >&2
     exit 1
   }
 done
 
+if [[ -L release || ( -e release && ! -d release ) ]]; then
+  printf 'Refusing unsafe release directory.\n' >&2
+  exit 1
+fi
 mkdir -p release
-sha256sum "${PAYLOAD_FILES[@]}" > release/SHA256SUMS
+manifest_tmp="$(mktemp release/.SHA256SUMS.XXXXXX)" || exit 1
+if ! sha256sum "${PAYLOAD_FILES[@]}" > "$manifest_tmp"; then
+  rm -f -- "$manifest_tmp"
+  printf 'Could not generate release checksums.\n' >&2
+  exit 1
+fi
+if ! mv -f -- "$manifest_tmp" release/SHA256SUMS; then
+  rm -f -- "$manifest_tmp"
+  printf 'Could not publish release checksum manifest.\n' >&2
+  exit 1
+fi
 printf 'Wrote release/SHA256SUMS for %d payload files.\n' "${#PAYLOAD_FILES[@]}"
