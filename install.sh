@@ -5,6 +5,7 @@ REPO_SLUG="${SSO_REPO_SLUG:-ach1992/simple-server-optimizer}"
 INSTALL_DIR="${SSO_INSTALL_DIR:-/root/simple-server-optimizer}"
 STATE_DIR="${SSO_STATE_DIR:-/etc/sso}"
 LAUNCHER_PATH="${SSO_LAUNCHER_PATH:-/usr/local/bin/sso}"
+RUN_AFTER_INSTALL="${SSO_INSTALL_RUN_SSO:-1}"
 SOURCE_PATH="${BASH_SOURCE[0]:-${0:-}}"
 if [[ -n "$SOURCE_PATH" && -f "$SOURCE_PATH" ]]; then
   SOURCE_DIR="$(cd -- "$(dirname -- "$SOURCE_PATH")" && pwd)"
@@ -460,7 +461,10 @@ finish_install() {
     err "Failed to create the SSO launcher."
     return 1
   }
-  run_sso
+  if [[ "$RUN_AFTER_INSTALL" == "1" ]]; then
+    run_sso
+  fi
+  ok "SSO installation/update completed."
 }
 
 menu() {
@@ -512,21 +516,26 @@ menu() {
 
 main() {
   local mode="auto"
-  case "${1:-}" in
-    "") ;;
-    --local) mode="local" ;;
-    --online) mode="online" ;;
-    -h|--help)
-      cat <<'HELP'
-Usage: install.sh [--local|--online]
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --local) mode="local" ;;
+      --online) mode="online" ;;
+      --no-run) RUN_AFTER_INSTALL=0 ;;
+      -h|--help)
+        cat <<'HELP'
+Usage: install.sh [--local|--online] [--no-run]
 
   --local   install only from the complete payload beside this installer
   --online  resolve the latest published GitHub Release and verify SHA256SUMS
+  --no-run  install/update without starting the SSO menu afterward
 HELP
-      return 0
-      ;;
-    *) err "Unknown option: $1"; return 1 ;;
-  esac
+        return 0
+        ;;
+      *) err "Unknown option: $1"; return 1 ;;
+    esac
+    shift
+  done
 
   validate_runtime_paths || return 1
   need_root
