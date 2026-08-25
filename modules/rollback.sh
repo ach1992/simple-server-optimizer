@@ -38,8 +38,21 @@ backup_capture_firewall() {
 
 backup_capture_fail2ban() {
   local d="$1"
+  local managed="${F2B_SSO_LOCAL:-/etc/fail2ban/jail.d/sso.local}"
+  local nginx_marker="${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}"
   mkdir -p "$d/fail2ban"
-  cp -a /etc/fail2ban/jail.local "$d/fail2ban/" 2>/dev/null || true
+
+  if [[ -f "$managed" ]]; then
+    cp -a "$managed" "$d/fail2ban/sso.local"
+  else
+    : > "$d/fail2ban/sso.local.absent"
+  fi
+
+  if [[ -f "$nginx_marker" ]]; then
+    cp -a "$nginx_marker" "$d/fail2ban/nginx.enabled"
+  else
+    : > "$d/fail2ban/nginx.enabled.absent"
+  fi
 }
 
 
@@ -123,11 +136,35 @@ restore_from_dir() {
     ok "Disabling SSO firewall service (rollback) - done"
   fi
 
-  # fail2ban jail.local restore (only our managed file)
-  if [[ -f "$d/fail2ban/jail.local" ]]; then
-    ensure_dirs /etc/fail2ban
-    cp -a "$d/fail2ban/jail.local" /etc/fail2ban/jail.local 2>/dev/null || true
-    run_step "Restarting Fail2Ban (rollback)" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
+  # Restore only SSO-owned Fail2Ban state; never overwrite jail.local.
+  local f2b_managed="${F2B_SSO_LOCAL:-/etc/fail2ban/jail.d/sso.local}"
+  local f2b_nginx_marker="${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}"
+  local f2b_touched=0
+  if [[ -f "$d/fail2ban/sso.local" ]]; then
+    ensure_dirs "$(dirname "$f2b_managed")"
+    cp -a "$d/fail2ban/sso.local" "$f2b_managed"
+    f2b_touched=1
+  elif [[ -f "$d/fail2ban/sso.local.absent" ]]; then
+    rm -f "$f2b_managed"
+    f2b_touched=1
+  fi
+
+  if [[ -f "$d/fail2ban/nginx.enabled" ]]; then
+    ensure_dirs "$(dirname "$f2b_nginx_marker")"
+    cp -a "$d/fail2ban/nginx.enabled" "$f2b_nginx_marker"
+  elif [[ -f "$d/fail2ban/nginx.enabled.absent" ]]; then
+    rm -f "$f2b_nginx_marker"
+  fi
+
+  if [[ "$f2b_touched" == "1" ]] && cmd_exists fail2ban-client; then
+    if fail2ban-client -t; then
+      if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        run_step "Restarting Fail2Ban (rollback)" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
+      fi
+    else
+      err "Restored SSO Fail2Ban configuration did not validate; Fail2Ban was not restarted."
+      return 1
+    fi
   fi
 
   ok "Rollback completed."

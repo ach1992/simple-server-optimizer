@@ -50,10 +50,23 @@ module_uninstall() {
   rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
   run_step "Reloading systemd units" systemctl daemon-reload || true
 
-  # 3) Remove packages installed by SSO (only if marker files exist)
-  if [[ -f "$STATE_DIR/installed_fail2ban.marker" ]]; then
+  # 3) Remove SSO-owned Fail2Ban config, then remove the package only if SSO installed it.
+  local f2b_managed="${F2B_SSO_LOCAL:-/etc/fail2ban/jail.d/sso.local}"
+  local f2b_installed_by_sso=0
+  [[ -f "$STATE_DIR/installed_fail2ban.marker" ]] && f2b_installed_by_sso=1
+  rm -f "$f2b_managed" "${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}" 2>/dev/null || true
+
+  if [[ "$f2b_installed_by_sso" == "1" ]]; then
     run_step "Removing Fail2Ban (purge)" apt-get purge -y fail2ban || warn "Fail2Ban removal failed (continuing)."
     run_step "Autoremoving packages" apt-get autoremove -y || true
+  elif cmd_exists fail2ban-client; then
+    if fail2ban-client -t; then
+      if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        run_step "Restarting Fail2Ban after removing SSO config" systemctl restart fail2ban || warn "Could not restart Fail2Ban (continuing)."
+      fi
+    else
+      warn "Fail2Ban configuration is invalid after removing SSO config; service was not restarted."
+    fi
   fi
   if [[ -f "$STATE_DIR/installed_irqbalance.marker" ]]; then
     run_step "Removing irqbalance (purge)" apt-get purge -y irqbalance || warn "irqbalance removal failed (continuing)."
