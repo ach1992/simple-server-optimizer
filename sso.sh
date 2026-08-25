@@ -148,38 +148,39 @@ menu_update() {
   while true; do
     header
     section "Update SSO"
-    echo "1) Offline/Online note"
-    echo "2) Re-run installer (online/offline selector)"
+    echo "1) Update to latest verified release"
+    echo "2) Install from current local payload"
+    echo "3) Update security model"
     echo "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
-        info "If files exist in /root/simple-server-optimizer, installer can run offline."
-        info "Online mode downloads latest scripts. Blocklist file is not automatically downloaded."
+        if [[ ! -f "$SSO_DIR/install.sh" ]]; then
+          err "Installed install.sh is missing. Refusing to download/execute a mutable branch installer."
+          info "Reinstall from a published GitHub Release or a complete local checkout."
+          pause
+          continue
+        fi
+        info "Resolving and verifying the latest published release..."
+        bash "$SSO_DIR/install.sh" --online || warn "Verified release update failed; current installation was kept."
         pause
         ;;
       2)
-        # Re-run installer even if install.sh is missing locally (robust for online installs)
-        local installer="/tmp/sso-install.sh"
-        local url="https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh"
-        if [[ -f "$SSO_DIR/install.sh" ]]; then
-          info "Re-running local installer..."
-          bash "$SSO_DIR/install.sh" || warn "Installer exited with error."
-        else
-          warn "Local install.sh not found. Downloading installer from GitHub..."
-          if ! cmd_exists curl; then
-            run_step "Installing curl" apt-get update -y || true
-            run_step "Installing curl" apt-get install -y curl || true
-          fi
-          if cmd_exists curl; then
-            run_step "Downloading installer" curl -fsSL "$url" -o "$installer" || { err "Failed to download installer."; pause; break; }
-            bash "$installer" || warn "Installer exited with error."
-          else
-            err "curl is not available; cannot download installer."
-          fi
+        if [[ ! -f "$SSO_DIR/install.sh" ]]; then
+          err "Installed install.sh is missing."
+          pause
+          continue
         fi
+        info "Installing from the current local SSO payload..."
+        bash "$SSO_DIR/install.sh" --local || warn "Local install failed; current installation was kept."
+        pause
         ;;
-
+      3)
+        info "Online updates resolve a published GitHub Release tag, download its SHA256SUMS manifest,"
+        info "verify the exact runtime payload, validate Bash syntax, then replace the live install."
+        info "Mutable main-branch files are not executed as the trusted update payload."
+        pause
+        ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
