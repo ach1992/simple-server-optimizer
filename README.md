@@ -21,11 +21,12 @@ It is designed to be:
 The current codebase provides:
 
 - **Firewall automation**
-  - managed blocklist/whitelist state;
+  - managed blocklist/whitelist state with strict IPv4/CIDR validation and redundant-network collapse;
   - nftables or iptables/ipset backend depending on availability;
-  - SSO-namespaced rules;
-  - reboot persistence through an SSO systemd restore service;
-  - common BitTorrent-port blocking as a best-effort port rule, not a complete P2P detector.
+  - fast bulk/staged application instead of one backend process per list entry;
+  - blacklist/whitelist add/remove updates the active SSO firewall immediately when it is enabled;
+  - SSO-namespaced rules and reboot persistence through an SSO systemd restore service;
+  - common BitTorrent/P2P port blocking as a best-effort port rule, not a complete protocol detector.
 
 - **Fail2Ban helper**
   - SSH-focused setup;
@@ -171,10 +172,13 @@ systemctl status sso-cpuirq.service
 
 ## Firewall Notes
 
-- SSO currently detects nftables first and may fall back to iptables/ipset.
+- SSO detects nftables first and may fall back to iptables/ipset.
+- Firewall lists are validated before apply; malformed input aborts without replacing active policy.
+- nftables uses an inactive staging table, bounded set batches, and a small final activation transaction so traffic does not observe partially populated sets.
+- the iptables/ipset fallback uses bulk set restore/swap plus `iptables-restore --test` before activation.
 - SSO uses namespaced firewall objects and should not assume ownership of unrelated firewall policy.
-- Current v1.0 behavior primarily manages host `INPUT`/`OUTPUT`; explicit VPN routed-traffic (`FORWARD`) coverage is planned after the v1.1.0 stabilization/test gate.
-- The existing “BitTorrent” option blocks common ports only and must be treated as best-effort abuse reduction, not complete protocol detection.
+- The v1.1 stabilization scope still manages host `INPUT`/`OUTPUT`; explicit VPN routed-traffic (`FORWARD`) coverage is planned only after the v1.1.0 real-server test gate.
+- “Common P2P/BitTorrent ports” is best-effort abuse reduction only; it is not complete BitTorrent/P2P protocol detection.
 
 If you maintain another firewall manager, review interactions carefully before enabling SSO rules.
 

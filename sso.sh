@@ -85,7 +85,7 @@ menu_firewall() {
     echo "4) Blacklist manager (add/remove/show)"
     echo "5) Whitelist manager (add/remove/show)"
     echo "6) Status (counts + active backend)"
-    echo "7) Block BitTorrent traffic (ports + common tracker ports)"
+    echo "7) Common P2P/BitTorrent ports (best effort)"
     echo "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
