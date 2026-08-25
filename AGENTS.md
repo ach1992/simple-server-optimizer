@@ -15,7 +15,7 @@ For normal development or a replacement Master, recover current truth from the s
 
 Current Git/GitHub/CI evidence is authoritative for mutable state. Do not reconstruct current status from old chat summaries.
 
-`PROJECT-MASTER-PROMPT.md` is a bootstrap source-of-intent, not part of the routine recovery path. Read it only when project-level intent, durable constraints, supported environments, non-goals, or completion criteria are materially unclear or explicitly changing.
+`PROJECT-SPEC.md` is a bootstrap source-of-intent, not part of the routine recovery path. Read it only when project-level intent, durable constraints, supported environments, non-goals, or completion criteria are materially unclear or explicitly changing.
 
 ## Engineering rules
 
