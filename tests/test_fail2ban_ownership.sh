@@ -134,9 +134,49 @@ test_active_service_is_restarted() {
   return "$rc"
 }
 
+test_whitelist_parser_strips_inline_comments() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  printf '203.0.113.10 # office\n198.51.100.0/24;partner\n# comment\n' > "$tmp/whitelist"
+
+  local output
+  output="$(ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    STATE_DIR="$FIXTURE_ROOT/state"
+    STATE_WHITELIST="$FIXTURE_ROOT/whitelist"
+    source "$ROOT_DIR/modules/fail2ban.sh"
+    fail2ban_collect_whitelist_ips
+  ')" || {
+    rm -rf "$tmp"
+    return 1
+  }
+
+  rm -rf "$tmp"
+  [[ "$output" == "203.0.113.10 198.51.100.0/24" ]]
+}
+
+test_handled_menu_failure_returns_to_caller() {
+  ROOT_DIR="$ROOT_DIR" bash -c '
+    set -Eeuo pipefail
+    STATE_DIR="/tmp/sso-test-state-unused"
+    source "$ROOT_DIR/modules/fail2ban.sh"
+    header() { :; }
+    section() { :; }
+    backup_create() { printf "%s\n" "/tmp/backup"; }
+    ensure_fail2ban_installed() { return 0; }
+    detect_nginx() { return 1; }
+    warn() { :; }
+    pause() { :; }
+    module_fail2ban_enable_nginx
+    printf "returned-to-menu\n"
+  ' | grep -q '^returned-to-menu$'
+}
+
 run_test "preinstalled Fail2Ban package is not marked as SSO-owned" test_preinstalled_package_is_not_marked_sso_owned
 run_test "SSO-installed Fail2Ban package is marked as SSO-owned" test_sso_installed_package_is_marked_owned
 run_test "config-only Fail2Ban apply preserves inactive service state" test_config_only_apply_preserves_inactive_service
 run_test "explicit Fail2Ban enable starts an inactive service" test_explicit_enable_starts_inactive_service
 run_test "active Fail2Ban service is restarted after config apply" test_active_service_is_restarted
+run_test "Fail2Ban whitelist parser strips inline comments" test_whitelist_parser_strips_inline_comments
+run_test "handled Fail2Ban menu failures return to the menu" test_handled_menu_failure_returns_to_caller
 finish_tests
