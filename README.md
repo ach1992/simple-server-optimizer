@@ -88,26 +88,38 @@ Version support is a compatibility contract. Changes to this list should be back
 
 ## Quick Start
 
-### Option A: online installer
+### Option A: published release / verified online update
 
-Current `main` installer:
+SSO's trusted online path does **not** use `main` as the runtime payload. It:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh -o /tmp/sso-install.sh \
-  && sudo bash /tmp/sso-install.sh
-```
+1. resolves a published SemVer GitHub Release tag;
+2. resolves that tag to its exact Git commit SHA;
+3. downloads `release/SHA256SUMS` and the runtime payload from that commit;
+4. verifies the manifest describes the exact expected payload and validates every SHA256 checksum;
+5. validates Bash syntax in a staging directory;
+6. preserves the current installation as `.bak` and atomically activates the staged payload.
 
-> Security note: the v1.1.0 stabilization work is replacing mutable-branch-only update trust with an immutable release + integrity-verification model. For important production systems, prefer a reviewed release once v1.1.0 is published.
+There is no fallback that silently executes mutable `main` files. If no published release exists, verified online installation fails closed and a complete local checkout must be used.
+
+The exact bootstrap/checksum commands for `v1.1.0` will be published with that GitHub Release after the stabilization scope is complete.
 
 ### Option B: local/offline install
 
-Clone or download the repository, then:
+Clone or download a complete repository checkout, then run:
+
+```bash
+sudo bash install.sh --local
+```
+
+Local payload detection is based on the directory that actually contains `install.sh`; the repository no longer needs to already be placed at `/root/simple-server-optimizer`.
+
+Interactive mode is also supported:
 
 ```bash
 sudo bash install.sh
 ```
 
-The v1.1.0 stabilization work includes fixing local payload detection so this path reliably uses the actual directory containing the installer payload.
+When a complete local payload is present, the installer lets you choose between that local payload and the latest verified release.
 
 ### Run after installation
 
@@ -120,6 +132,16 @@ Direct path:
 ```bash
 sudo bash /root/simple-server-optimizer/sso.sh
 ```
+
+### Update an installed node
+
+Run:
+
+```bash
+sudo sso
+```
+
+Then choose **Update SSO → Update to latest verified release**. The installed updater refuses to download and execute a mutable branch installer when its local `install.sh` is missing.
 
 ---
 
