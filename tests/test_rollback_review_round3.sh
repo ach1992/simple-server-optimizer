@@ -172,8 +172,81 @@ markerless_v2_residue_needs_positive_complete_marker() {
   return "$rc"
 }
 
+malformed_selector_metadata_cannot_masquerade_as_legacy() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p \
+    "$tmp/backups/20260101-legacy" \
+    "$tmp/backups/20260102-format-dir/sysctl" \
+    "$tmp/backups/20260103-format-dangling/sysctl" \
+    "$tmp/backups/20260104-format-live-symlink/sysctl" \
+    "$tmp/backups/20260105-format-fifo/sysctl" \
+    "$tmp/backups/20260106-tag-symlink/sysctl"
+
+  printf 'legacy:test\n' > "$tmp/backups/20260101-legacy/TAG"
+
+  local name
+  for name in \
+    20260102-format-dir \
+    20260103-format-dangling \
+    20260104-format-live-symlink \
+    20260105-format-fifo \
+    20260106-tag-symlink; do
+    printf 'malformed:%s\n' "$name" > "$tmp/backups/$name/TAG"
+    printf 'operator-before\n' > "$tmp/backups/$name/sysctl/bbr.conf"
+  done
+
+  mkdir "$tmp/backups/20260102-format-dir/FORMAT"
+  ln -s "$tmp/missing-format" "$tmp/backups/20260103-format-dangling/FORMAT"
+  printf '2\n' > "$tmp/real-format"
+  ln -s "$tmp/real-format" "$tmp/backups/20260104-format-live-symlink/FORMAT"
+  : > "$tmp/backups/20260104-format-live-symlink/COMPLETE"
+  mkfifo "$tmp/backups/20260105-format-fifo/FORMAT"
+  printf 'malformed:outside-tag\n' > "$tmp/outside-tag"
+  rm -f "$tmp/backups/20260106-tag-symlink/TAG"
+  ln -s "$tmp/outside-tag" "$tmp/backups/20260106-tag-symlink/TAG"
+
+  (
+    set -Eeuo pipefail
+    STATE_DIR="$tmp/state"
+    BACKUP_DIR_BASE="$tmp/backups"
+    SSO_DIR="$tmp/install"
+    source "$ROLLBACK_SOURCE"
+    err() { :; }
+
+    backup_is_usable_dir "$BACKUP_DIR_BASE/20260101-legacy"
+
+    local malformed listed
+    for malformed in \
+      20260102-format-dir \
+      20260103-format-dangling \
+      20260104-format-live-symlink \
+      20260105-format-fifo \
+      20260106-tag-symlink; do
+      if backup_is_usable_dir "$BACKUP_DIR_BASE/$malformed"; then exit 1; fi
+      if restore_from_dir "$BACKUP_DIR_BASE/$malformed" >/dev/null 2>&1; then exit 1; fi
+      if backup_snapshot_is_preownership bbr "$BACKUP_DIR_BASE/$malformed" historical; then exit 1; fi
+      if backup_persist_resource_baseline bbr "$BACKUP_DIR_BASE/$malformed"; then exit 1; fi
+    done
+
+    listed="$(backup_list_names "$BACKUP_DIR_BASE")"
+    [[ "$listed" == '20260101-legacy' ]]
+    [[ "$(backup_last_dir)" == "$BACKUP_DIR_BASE/20260101-legacy" ]]
+    if backup_first_tag_in_root "$BACKUP_DIR_BASE" 'malformed:*' >/dev/null 2>&1; then exit 1; fi
+
+    mkdir -p "$STATE_DIR/ownership-baselines/bbr"
+    printf 'network:fq_bbr\n' > "$STATE_DIR/ownership-baselines/bbr/TAG"
+    mkdir "$STATE_DIR/ownership-baselines/bbr/FORMAT"
+    if backup_resource_baseline_dir bbr >/dev/null 2>&1; then exit 1; fi
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "certification failure remains quarantined without unsafe cleanup" certification_read_failure_stays_quarantined_if_cleanup_fails
 run_test "ambiguous tcp_bbr legacy history is never promoted or replaced by current fallback" ambiguous_sso_bbr_history_is_not_promoted_or_replaced_by_current
 run_test "fresh first BBR operation preserves explicit shared-file absence" fresh_first_bbr_operation_can_preserve_explicit_absence
 run_test "FORMAT=2 selectors require a positive non-symlink COMPLETE marker" markerless_v2_residue_needs_positive_complete_marker
+run_test "malformed selector metadata cannot masquerade as a legacy snapshot" malformed_selector_metadata_cannot_masquerade_as_legacy
 finish_tests

@@ -94,9 +94,10 @@ backup_is_usable_dir() {
 
   [[ -d "$d" ]] || return 1
   [[ ! -e "$d/INCOMPLETE" && ! -L "$d/INCOMPLETE" ]] || return 1
-  [[ -f "$d/TAG" ]] || return 1
+  [[ -f "$d/TAG" && ! -L "$d/TAG" ]] || return 1
 
-  if [[ -f "$d/FORMAT" ]]; then
+  if backup_path_exists "$d/FORMAT"; then
+    [[ -f "$d/FORMAT" && ! -L "$d/FORMAT" ]] || return 1
     format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
     [[ "$format" == "$SSO_BACKUP_FORMAT" ]] || return 1
     [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
