@@ -432,12 +432,20 @@ download_online() {
 create_launcher() {
   validate_runtime_paths || return 1
   [[ -f "$INSTALL_DIR/sso.sh" ]] || return 1
-  mkdir -p "$(dirname "$LAUNCHER_PATH")" || return 1
-  if ! cat > "$LAUNCHER_PATH" <<LAUNCHER_SCRIPT
+
+  local launcher_dir launcher_tmp state_file_quoted fallback_install_quoted
+  launcher_dir="$(dirname "$LAUNCHER_PATH")"
+  mkdir -p "$launcher_dir" || return 1
+  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || return 1
+
+  printf -v state_file_quoted '%q' "$STATE_DIR/install_dir"
+  printf -v fallback_install_quoted '%q' "$INSTALL_DIR"
+
+  if ! cat > "$launcher_tmp" <<LAUNCHER_SCRIPT
 #!/usr/bin/env bash
 set -Eeuo pipefail
-INSTALL_DIR_FILE="$STATE_DIR/install_dir"
-FALLBACK_INSTALL_DIR="$INSTALL_DIR"
+INSTALL_DIR_FILE=$state_file_quoted
+FALLBACK_INSTALL_DIR=$fallback_install_quoted
 if [[ -r "\$INSTALL_DIR_FILE" ]]; then
   INSTALL_DIR="\$(cat "\$INSTALL_DIR_FILE")"
 else
@@ -447,9 +455,14 @@ fi
 exec bash "\${INSTALL_DIR}/sso.sh" "\$@"
 LAUNCHER_SCRIPT
   then
+    rm -f "$launcher_tmp"
     return 1
   fi
-  chmod +x "$LAUNCHER_PATH"
+
+  if ! chmod 0755 "$launcher_tmp" || ! mv -f "$launcher_tmp" "$LAUNCHER_PATH"; then
+    rm -f "$launcher_tmp"
+    return 1
+  fi
 }
 
 run_sso() {
