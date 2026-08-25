@@ -162,7 +162,11 @@ menu_update() {
           continue
         fi
         info "Resolving and verifying the latest published release..."
-        bash "$SSO_DIR/install.sh" --online || warn "Verified release update failed; current installation was kept."
+        if bash "$SSO_DIR/install.sh" --online --no-run; then
+          ok "Update completed. Reloading SSO..."
+          exec bash "$SSO_DIR/sso.sh"
+        fi
+        warn "Verified release update failed; current installation was kept."
         pause
         ;;
       2)
@@ -172,7 +176,11 @@ menu_update() {
           continue
         fi
         info "Installing from the current local SSO payload..."
-        bash "$SSO_DIR/install.sh" --local || warn "Local install failed; current installation was kept."
+        if bash "$SSO_DIR/install.sh" --local --no-run; then
+          ok "Local install completed. Reloading SSO..."
+          exec bash "$SSO_DIR/sso.sh"
+        fi
+        warn "Local install failed; current installation was kept."
         pause
         ;;
       3)
