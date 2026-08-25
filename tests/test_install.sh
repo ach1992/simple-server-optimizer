@@ -76,7 +76,7 @@ test_update_preserves_previous_installation() {
   tmp="$(mktemp -d)" || return 1
   local payload="$tmp/payload"
   make_payload "$payload"
-  mkdir -p "$tmp/install"
+  make_payload "$tmp/install"
   printf 'previous\n' > "$tmp/install/PREVIOUS"
 
   ROOT_DIR="$ROOT_DIR" PAYLOAD="$payload" TMPROOT="$tmp" bash -c '

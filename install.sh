@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_SLUG="${SSO_REPO_SLUG:-ach1992/simple-server-optimizer}"
-INSTALL_DIR="${SSO_INSTALL_DIR:-/root/simple-server-optimizer}"
-STATE_DIR="${SSO_STATE_DIR:-/etc/sso}"
-LAUNCHER_PATH="${SSO_LAUNCHER_PATH:-/usr/local/bin/sso}"
-RUN_AFTER_INSTALL="${SSO_INSTALL_RUN_SSO:-1}"
+REPO_SLUG="ach1992/simple-server-optimizer"
+INSTALL_DIR="/root/simple-server-optimizer"
+STATE_DIR="/etc/sso"
+LAUNCHER_PATH="/usr/local/bin/sso"
+RUN_AFTER_INSTALL=1
+
+# Runtime path overrides are test-only hooks. The root-executed production
+# installer always uses the project-owned paths above so inherited environment
+# variables cannot redirect destructive writes or the trusted release source.
+if [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]]; then
+  INSTALL_DIR="${SSO_INSTALL_DIR:-$INSTALL_DIR}"
+  STATE_DIR="${SSO_STATE_DIR:-$STATE_DIR}"
+  LAUNCHER_PATH="${SSO_LAUNCHER_PATH:-$LAUNCHER_PATH}"
+  RUN_AFTER_INSTALL="${SSO_INSTALL_RUN_SSO:-$RUN_AFTER_INSTALL}"
+fi
+
 SOURCE_PATH="${BASH_SOURCE[0]:-${0:-}}"
 if [[ -n "$SOURCE_PATH" && -f "$SOURCE_PATH" ]]; then
   SOURCE_DIR="$(cd -- "$(dirname -- "$SOURCE_PATH")" && pwd)"
@@ -84,6 +95,18 @@ path_is_within() {
   [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
 }
 
+launcher_is_sso_owned() {
+  local launcher="$1"
+  [[ -f "$launcher" && ! -L "$launcher" ]] || return 1
+  if grep -Fq '# Managed by Simple Server Optimizer.' "$launcher" 2>/dev/null; then
+    return 0
+  fi
+
+  # Compatibility with the launcher emitted by the pre-v1.1.0 installer.
+  grep -Fq 'INSTALL_DIR_FILE=' "$launcher" 2>/dev/null \
+    && grep -Fq 'exec bash "${INSTALL_DIR}/sso.sh" "$@"' "$launcher" 2>/dev/null
+}
+
 validate_runtime_paths() {
   local p
   for p in "$INSTALL_DIR" "$STATE_DIR" "$LAUNCHER_PATH"; do
@@ -98,6 +121,25 @@ validate_runtime_paths() {
         ;;
     esac
   done
+
+  if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || {
+      err "Existing installation path is not a regular directory: $INSTALL_DIR"
+      return 1
+    }
+  fi
+  if [[ -e "$STATE_DIR" || -L "$STATE_DIR" ]]; then
+    [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || {
+      err "Existing state path is not a regular directory: $STATE_DIR"
+      return 1
+    }
+  fi
+  if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+    launcher_is_sso_owned "$LAUNCHER_PATH" || {
+      err "Refusing to replace an existing launcher path that is not SSO-owned: $LAUNCHER_PATH"
+      return 1
+    }
+  fi
 
   local backup_dir="${INSTALL_DIR}.bak"
   if path_is_within "$STATE_DIR" "$INSTALL_DIR" \
@@ -161,6 +203,31 @@ validate_payload() {
   bash -n "${scripts[@]}"
 }
 
+validate_existing_install_state() {
+  local backup="${INSTALL_DIR}.bak"
+  local has_current=0
+
+  if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || return 1
+    has_payload "$INSTALL_DIR" || {
+      err "Refusing to replace an existing directory that is not a complete SSO installation: $INSTALL_DIR"
+      return 1
+    }
+    has_current=1
+  fi
+
+  if [[ -e "$backup" || -L "$backup" ]]; then
+    [[ "$has_current" == "1" ]] || {
+      err "A recovery backup exists without a live SSO installation; recover or move it before reinstalling: $backup"
+      return 1
+    }
+    [[ -d "$backup" && ! -L "$backup" ]] && has_payload "$backup" || {
+      err "Refusing to delete or replace an unrecognized recovery path: $backup"
+      return 1
+    }
+  fi
+}
+
 curl_fetch() {
   local url="$1"
   local out="$2"
@@ -181,21 +248,18 @@ validate_release_ref() {
 }
 
 resolve_release_ref() {
-  if [[ -n "${SSO_RELEASE_REF:-}" ]]; then
-    validate_release_ref "$SSO_RELEASE_REF" || {
-      err "Invalid release ref: $SSO_RELEASE_REF"
-      return 1
-    }
-    printf '%s\n' "$SSO_RELEASE_REF"
-    return 0
-  fi
-
   ensure_tools || return 1
-  local effective=""
+  local effective="" prefix ref
   effective="$(curl -fLsS --retry 3 --retry-delay 1 -o /dev/null -w '%{url_effective}' \
     "https://github.com/${REPO_SLUG}/releases/latest")" || return 1
 
-  local ref="${effective##*/}"
+  prefix="https://github.com/${REPO_SLUG}/releases/tag/"
+  [[ "$effective" == "$prefix"* ]] || {
+    err "Latest release did not resolve to the official repository release path."
+    return 1
+  }
+  ref="${effective#"$prefix"}"
+  [[ "$ref" != */* ]] || return 1
   validate_release_ref "$ref" || {
     err "No valid published SSO release could be resolved."
     return 1
@@ -356,9 +420,13 @@ install_staged_payload() {
   local stage="$1"
   validate_runtime_paths || return 1
   validate_payload "$stage" || return 1
+  validate_existing_install_state || return 1
 
   local parent new backup had_current=0
   parent="$(dirname "$INSTALL_DIR")"
+  backup="${INSTALL_DIR}.bak"
+  [[ -d "$INSTALL_DIR" ]] && had_current=1
+
   mkdir -p "$parent" "$STATE_DIR" || {
     err "Could not prepare installation/state directories."
     return 1
@@ -367,7 +435,6 @@ install_staged_payload() {
     err "Could not create a staging directory beside $INSTALL_DIR"
     return 1
   }
-  backup="${INSTALL_DIR}.bak"
 
   local f
   for f in "${PAYLOAD_FILES[@]}"; do
@@ -384,8 +451,7 @@ install_staged_payload() {
     return 1
   fi
 
-  if [[ -d "$INSTALL_DIR" ]]; then
-    had_current=1
+  if [[ "$had_current" == "1" ]]; then
     if ! rm -rf -- "$backup" || [[ -e "$backup" || -L "$backup" ]]; then
       rm -rf -- "$new" 2>/dev/null || true
       err "Could not rotate the previous installation backup."
@@ -497,6 +563,7 @@ create_launcher() {
 
   if ! cat > "$launcher_tmp" <<LAUNCHER_SCRIPT
 #!/usr/bin/env bash
+# Managed by Simple Server Optimizer.
 set -Eeuo pipefail
 INSTALL_DIR_FILE=$state_file_quoted
 FALLBACK_INSTALL_DIR=$fallback_install_quoted
