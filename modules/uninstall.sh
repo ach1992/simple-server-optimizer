@@ -163,13 +163,18 @@ module_uninstall() {
     return 0
   fi
 
-  # Baselines are resource-specific. The first v2 snapshot may have been made
-  # only after a legacy release had already taken ownership of a shared file
-  # or service, so format version is not a chronology signal.
+  # Ownership baselines live outside the replaceable install tree. Retry the
+  # conservative previous-install migration before making uninstall decisions;
+  # never substitute "earliest retained active backup" for original ownership.
+  if ! backup_migrate_ownership_baselines; then
+    uninstall_abort_with_recovery "Could not reconcile durable ownership baselines."
+    return 0
+  fi
+
   local bbr_baseline="" f2b_baseline="" irq_baseline=""
-  bbr_baseline="$(backup_first_tag_dir 'network:fq_bbr' 2>/dev/null || true)"
-  f2b_baseline="$(backup_first_tag_dir 'fail2ban:*' 2>/dev/null || true)"
-  irq_baseline="$(backup_first_tag_dir 'cpu_irq:irqbalance' 2>/dev/null || true)"
+  bbr_baseline="$(backup_resource_baseline_dir bbr 2>/dev/null || true)"
+  f2b_baseline="$(backup_resource_baseline_dir fail2ban 2>/dev/null || true)"
+  irq_baseline="$(backup_resource_baseline_dir irqbalance 2>/dev/null || true)"
 
   if [[ -n "$bbr_baseline" ]]; then
     info "Using pre-BBR resource baseline: $bbr_baseline"

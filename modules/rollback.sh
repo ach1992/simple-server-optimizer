@@ -69,14 +69,16 @@ backup_create_dir() {
   local prefix d i
   prefix="$BACKUP_DIR_BASE/$(ts)"
   d="$prefix"
-  if mkdir "$d" 2>/dev/null; then
-    printf '%s\n' "$d"
-    return 0
-  fi
 
-  for ((i=1; i<=9999; i++)); do
-    printf -v d '%s-%04d' "$prefix" "$i"
+  for ((i=0; i<=9999; i++)); do
+    if (( i > 0 )); then
+      printf -v d '%s-%04d' "$prefix" "$i"
+    fi
     if mkdir "$d" 2>/dev/null; then
+      if ! : > "$d/INCOMPLETE"; then
+        rmdir -- "$d" 2>/dev/null || true
+        return 1
+      fi
       printf '%s\n' "$d"
       return 0
     fi
@@ -84,6 +86,35 @@ backup_create_dir() {
 
   printf 'Unable to allocate a unique backup directory under %s\n' "$BACKUP_DIR_BASE" >&2
   return 1
+}
+
+backup_is_usable_dir() {
+  local d="$1"
+  local format=""
+
+  [[ -d "$d" ]] || return 1
+  [[ ! -e "$d/INCOMPLETE" && ! -L "$d/INCOMPLETE" ]] || return 1
+  [[ -f "$d/TAG" ]] || return 1
+
+  if [[ -f "$d/FORMAT" ]]; then
+    format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
+    [[ "$format" == "$SSO_BACKUP_FORMAT" ]] || return 1
+  fi
+
+  return 0
+}
+
+backup_list_names() {
+  local root="${1:-$BACKUP_DIR_BASE}"
+  local name d
+  [[ -d "$root" ]] || return 0
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    d="$root/$name"
+    backup_is_usable_dir "$d" || continue
+    printf '%s\n' "$name"
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
 }
 
 backup_capture_sysctl() {
@@ -271,15 +302,35 @@ backup_capture_service_state() {
   local unit="$2"
   local sd="$d/services/$unit"
   mkdir -p "$sd" || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
 
-  local load="unknown" enabled="unknown" active="unknown"
-  if command -v systemctl >/dev/null 2>&1; then
-    load="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
-    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
-    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
-    [[ -n "$load" ]] || load="unknown"
-    [[ -n "$enabled" ]] || enabled="unknown"
-    [[ -n "$active" ]] || active="unknown"
+  local load="" enabled="" active=""
+  load="$(systemctl show -p LoadState --value "$unit" 2>/dev/null)" || return 1
+  case "$load" in
+    loaded|masked) ;;
+    not-found)
+      enabled="not-found"
+      active="inactive"
+      ;;
+    *) return 1 ;;
+  esac
+
+  if [[ "$load" != "not-found" ]]; then
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null)" || true
+    case "$enabled" in
+      enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect|generated|transient) ;;
+      *) return 1 ;;
+    esac
+
+    active="$(systemctl is-active "$unit" 2>/dev/null)" || true
+    case "$active" in
+      active|inactive) ;;
+      *) return 1 ;;
+    esac
+
+    if [[ "$load" == "masked" && "$enabled" != "masked" && "$enabled" != "masked-runtime" ]]; then
+      return 1
+    fi
   fi
 
   printf '%s\n' "$load" > "$sd/load" || return 1
@@ -302,10 +353,12 @@ backup_capture_services() {
 backup_mark() {
   local d="$1"
   local tag="$2"
+
   printf '%s\n' "$tag" > "$d/TAG" || return 1
-  # FORMAT is deliberately written last. Its presence certifies that every
-  # required capture completed successfully.
   printf '%s\n' "$SSO_BACKUP_FORMAT" > "$d/FORMAT" || return 1
+  rm -f -- "$d/INCOMPLETE" || return 1
+  backup_path_exists "$d/INCOMPLETE" && return 1
+  backup_is_usable_dir "$d"
 }
 
 backup_create() {
@@ -321,8 +374,16 @@ backup_create() {
     || ! backup_capture_fail2ban "$d" \
     || ! backup_capture_services "$d" \
     || ! backup_mark "$d" "$tag"; then
-    rm -rf -- "$d" 2>/dev/null || true
-    printf 'Backup capture failed; incomplete snapshot was discarded.\n' >&2
+    if ! rm -rf -- "$d" 2>/dev/null || backup_path_exists "$d"; then
+      printf 'Backup capture failed; incomplete snapshot remains quarantined at %s and will be ignored.\n' "$d" >&2
+    else
+      printf 'Backup capture failed; incomplete snapshot was discarded.\n' >&2
+    fi
+    return 1
+  fi
+
+  if ! backup_record_ownership_baseline "$tag" "$d"; then
+    printf 'Backup is complete, but the durable ownership baseline could not be preserved; refusing the requested mutation.\n' >&2
     return 1
   fi
 
@@ -336,53 +397,217 @@ module_rollback_list() {
     warn "No backups directory."
     pause; return
   fi
-  find "$BACKUP_DIR_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
-    | sort | tail -n 50 | sed 's/^/ - /' || true
+  backup_list_names "$BACKUP_DIR_BASE" | tail -n 50 | sed 's/^/ - /' || true
   pause
 }
 
 backup_last_dir() {
-  local name
-  name="$(find "$BACKUP_DIR_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | tail -n1 || true)"
-  [[ -n "$name" ]] && printf '%s/%s\n' "$BACKUP_DIR_BASE" "$name"
+  local name=""
+  name="$(backup_list_names "$BACKUP_DIR_BASE" | tail -n1 || true)"
+  [[ -n "$name" ]] || return 1
+  printf '%s/%s\n' "$BACKUP_DIR_BASE" "$name"
 }
 
 backup_first_current_format_dir() {
   local name d
-  [[ -d "$BACKUP_DIR_BASE" ]] || return 1
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     d="$BACKUP_DIR_BASE/$name"
-    if [[ -f "$d/FORMAT" ]] && [[ "$(cat "$d/FORMAT" 2>/dev/null || true)" == "$SSO_BACKUP_FORMAT" ]]; then
-      printf '%s\n' "$d"
-      return 0
-    fi
-  done < <(find "$BACKUP_DIR_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+    [[ -f "$d/FORMAT" ]] || continue
+    [[ "$(cat "$d/FORMAT" 2>/dev/null || true)" == "$SSO_BACKUP_FORMAT" ]] || continue
+    printf '%s\n' "$d"
+    return 0
+  done < <(backup_list_names "$BACKUP_DIR_BASE")
   return 1
 }
 
-# Return the earliest backup whose TAG matches a shell pattern. Resource
-# baselines must be tied to the operation that first took ownership; backup
-# format alone does not prove that chronology.
-backup_first_tag_dir() {
-  local pattern="$1"
+backup_first_tag_in_root() {
+  local root="$1"
+  local pattern="$2"
+  local exclude="${3:-}"
   local name d tag
-  [[ -d "$BACKUP_DIR_BASE" ]] || return 1
+  [[ -d "$root" ]] || return 1
 
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
-    d="$BACKUP_DIR_BASE/$name"
-    [[ -f "$d/TAG" ]] || continue
-    tag="$(cat "$d/TAG" 2>/dev/null || true)"
+    d="$root/$name"
+    [[ -n "$exclude" && "$d" == "$exclude" ]] && continue
+    backup_is_usable_dir "$d" || continue
+    tag="$(cat "$d/TAG" 2>/dev/null)" || continue
     case "$tag" in
       $pattern)
         printf '%s\n' "$d"
         return 0
         ;;
     esac
-  done < <(find "$BACKUP_DIR_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
   return 1
 }
+
+backup_first_tag_dir() {
+  backup_first_tag_in_root "$BACKUP_DIR_BASE" "$1"
+}
+
+backup_baseline_store() {
+  printf '%s\n' "${SSO_OWNERSHIP_BASELINE_DIR:-$STATE_DIR/ownership-baselines}"
+}
+
+backup_baseline_path() {
+  local resource="$1"
+  printf '%s/%s\n' "$(backup_baseline_store)" "$resource"
+}
+
+backup_persist_resource_baseline() {
+  local resource="$1"
+  local source="$2"
+  local base final tmp
+
+  backup_is_usable_dir "$source" || return 1
+  base="$(backup_baseline_store)" || return 1
+  final="$base/$resource"
+
+  if backup_is_usable_dir "$final"; then
+    return 0
+  fi
+  if [[ -e "$final" || -L "$final" ]]; then
+    return 1
+  fi
+
+  mkdir -p "$base" || return 1
+  tmp="$(mktemp -d "$base/.${resource}.XXXXXX")" || return 1
+  if ! cp -a -- "$source/." "$tmp/"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$source" > "$tmp/BASELINE_ORIGIN" || {
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  }
+  if ! mv -- "$tmp" "$final"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  backup_is_usable_dir "$final"
+}
+
+backup_previous_install_source() {
+  local pattern="$1"
+  [[ -n "${SSO_DIR:-}" ]] || return 1
+  backup_first_tag_in_root "${SSO_DIR}.bak/backups" "$pattern"
+}
+
+backup_snapshot_is_preownership() {
+  local resource="$1"
+  local source="$2"
+
+  backup_is_usable_dir "$source" || return 1
+  case "$resource" in
+    bbr)
+      # fq/BBR always creates these namespaced files before it owns the shared
+      # modules-load path. Their presence proves this is already post-ownership.
+      backup_path_exists "$source/sysctl/99-sso-qdisc.conf" && return 1
+      backup_path_exists "$source/sysctl/99-sso-bbr.conf" && return 1
+      return 0
+      ;;
+    fail2ban)
+      if [[ -f "$source/fail2ban/sso.local" ]] \
+        && grep -Fq '# Managed by Simple Server Optimizer.' "$source/fail2ban/sso.local"; then
+        return 1
+      fi
+      return 0
+      ;;
+    irqbalance)
+      [[ ! -f "${STATE_DIR:-/etc/sso}/installed_irqbalance.marker" ]] || return 1
+      # A retained earlier irqbalance operation proves SSO already touched the
+      # service; without its durable baseline we preserve ambiguity instead of
+      # pretending the current service state is pre-ownership.
+      if [[ -n "${SSO_DIR:-}" ]] \
+        && backup_first_tag_in_root "${SSO_DIR}.bak/backups" 'cpu_irq:irqbalance' >/dev/null 2>&1; then
+        return 1
+      fi
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+backup_record_ownership_baseline() {
+  local tag="$1"
+  local current="$2"
+  local resource="" pattern="" source="" final=""
+
+  case "$tag" in
+    network:fq_bbr) resource="bbr"; pattern="network:fq_bbr" ;;
+    fail2ban:*) resource="fail2ban"; pattern="fail2ban:*" ;;
+    cpu_irq:irqbalance) resource="irqbalance"; pattern="cpu_irq:irqbalance" ;;
+    *) return 0 ;;
+  esac
+
+  final="$(backup_baseline_path "$resource")"
+  backup_is_usable_dir "$final" && return 0
+  if [[ -e "$final" || -L "$final" ]]; then
+    return 1
+  fi
+
+  # Compatibility recovery is deliberately conservative: only the previous
+  # install tree can provide older chronology, and the candidate must still
+  # prove it predates SSO ownership of the resource. We never treat the
+  # earliest retained active backup as equivalent to the original baseline.
+  source="$(backup_previous_install_source "$pattern" 2>/dev/null || true)"
+  if [[ -n "$source" ]] && backup_snapshot_is_preownership "$resource" "$source"; then
+    backup_persist_resource_baseline "$resource" "$source"
+    return $?
+  fi
+
+  # On a genuinely first ownership-taking operation, the just-completed
+  # snapshot is directly pre-mutation and can become the durable baseline.
+  if backup_snapshot_is_preownership "$resource" "$current"; then
+    backup_persist_resource_baseline "$resource" "$current"
+    return $?
+  fi
+
+  # Legacy history can be irrecoverably ambiguous. That must not block safe
+  # namespaced changes, but uninstall will preserve the ambiguous shared state
+  # because no durable baseline will exist.
+  printf 'No trustworthy pre-ownership baseline could be established for %s; ambiguous shared state will be preserved on uninstall.\n' "$resource" >&2
+  return 0
+}
+
+backup_migrate_ownership_baselines() {
+  [[ -n "${STATE_DIR:-}" && -n "${BACKUP_DIR_BASE:-}" && -n "${SSO_DIR:-}" ]] || return 0
+
+  # Only BBR has enough legacy namespaced evidence to prove that a retained
+  # previous-install snapshot predates ownership of the shared bbr.conf path.
+  local final source
+  final="$(backup_baseline_path bbr)"
+  backup_is_usable_dir "$final" && return 0
+  if [[ -e "$final" || -L "$final" ]]; then
+    return 1
+  fi
+
+  source="$(backup_previous_install_source 'network:fq_bbr' 2>/dev/null || true)"
+  [[ -n "$source" ]] || return 0
+  backup_snapshot_is_preownership bbr "$source" || return 0
+  backup_persist_resource_baseline bbr "$source"
+}
+
+backup_resource_baseline_dir() {
+  local resource="$1"
+  local final
+  final="$(backup_baseline_path "$resource")"
+  backup_is_usable_dir "$final" || return 1
+  printf '%s\n' "$final"
+}
+
+if [[ -n "${STATE_DIR:-}" && -n "${BACKUP_DIR_BASE:-}" && -n "${SSO_DIR:-}" ]]; then
+  if ! backup_migrate_ownership_baselines; then
+    if declare -F warn >/dev/null 2>&1; then
+      warn "Could not migrate durable ownership baselines; ownership-changing operations will fail closed until this is resolved."
+    else
+      printf 'Could not migrate durable ownership baselines.\n' >&2
+    fi
+  fi
+fi
 
 backup_service_state_value() {
   local d="$1"
@@ -393,6 +618,69 @@ backup_service_state_value() {
   cat "$f"
 }
 
+backup_current_service_load() {
+  local unit="$1"
+  local load=""
+  load="$(systemctl show -p LoadState --value "$unit" 2>/dev/null)" || return 1
+  [[ -n "$load" ]] || return 1
+  printf '%s\n' "$load"
+}
+
+backup_current_service_enabled() {
+  local unit="$1"
+  local enabled=""
+  enabled="$(systemctl is-enabled "$unit" 2>/dev/null)" || true
+  case "$enabled" in
+    enabled|enabled-runtime|disabled|masked|masked-runtime|static|indirect|generated|transient) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$enabled"
+}
+
+backup_current_service_active() {
+  local unit="$1"
+  local active=""
+  active="$(systemctl is-active "$unit" 2>/dev/null)" || true
+  case "$active" in
+    active|inactive) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$active"
+}
+
+backup_normalize_service_unit_state() {
+  local unit="$1"
+  systemctl unmask --runtime "$unit" >/dev/null 2>&1 || true
+  systemctl unmask "$unit" >/dev/null 2>&1 || true
+  systemctl disable --runtime "$unit" >/dev/null 2>&1 || true
+  systemctl disable "$unit" >/dev/null 2>&1 || true
+}
+
+backup_restore_service_active() {
+  local unit="$1"
+  local desired="$2"
+  local restart_active="${3:-0}"
+  local current=""
+
+  case "$desired" in
+    active)
+      if [[ "$restart_active" == "1" ]]; then
+        systemctl restart "$unit" >/dev/null 2>&1 || return 1
+      else
+        systemctl start "$unit" >/dev/null 2>&1 || return 1
+      fi
+      ;;
+    inactive)
+      systemctl stop "$unit" >/dev/null 2>&1 || return 1
+      systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+      ;;
+    *) return 1 ;;
+  esac
+
+  current="$(backup_current_service_active "$unit")" || return 1
+  [[ "$current" == "$desired" ]]
+}
+
 backup_restore_service_state() {
   local d="$1"
   local unit="$2"
@@ -401,56 +689,51 @@ backup_restore_service_state() {
   [[ -d "$sd" ]] || return 2
   command -v systemctl >/dev/null 2>&1 || return 1
 
-  local load enabled active
-  load="$(cat "$sd/load" 2>/dev/null || echo unknown)"
-  enabled="$(cat "$sd/enabled" 2>/dev/null || echo unknown)"
-  active="$(cat "$sd/active" 2>/dev/null || echo unknown)"
+  local load enabled active current_load current_enabled
+  load="$(cat "$sd/load" 2>/dev/null)" || return 1
+  enabled="$(cat "$sd/enabled" 2>/dev/null)" || return 1
+  active="$(cat "$sd/active" 2>/dev/null)" || return 1
 
   if [[ "$load" == "not-found" ]]; then
-    systemctl stop "$unit" >/dev/null 2>&1 || true
-    systemctl disable "$unit" >/dev/null 2>&1 || true
+    [[ "$enabled" == "not-found" && "$active" == "inactive" ]] || return 3
+    current_load="$(backup_current_service_load "$unit")" || return 1
+    [[ "$current_load" == "not-found" ]] || return 1
     return 0
   fi
 
-  # Validate the whole captured lifecycle state before performing any
-  # mutation. Unknown/unsupported evidence must never trigger an unmask.
-  [[ "$load" == "loaded" ]] || return 3
+  case "$load" in loaded|masked) ;; *) return 3 ;; esac
   case "$enabled" in
     masked|masked-runtime|enabled|enabled-runtime|disabled|static|indirect|generated|transient) ;;
     *) return 3 ;;
   esac
-  case "$active" in
-    active|inactive) ;;
-    *) return 3 ;;
-  esac
-
-  # Temporarily unmask so active state can be restored even when the desired
-  # final state is masked/masked-runtime; the requested mask is applied last.
-  systemctl unmask "$unit" >/dev/null 2>&1 || return 1
+  case "$active" in active|inactive) ;; *) return 3 ;; esac
 
   case "$enabled" in
-    enabled) systemctl enable "$unit" >/dev/null 2>&1 || return 1 ;;
-    enabled-runtime) systemctl enable --runtime "$unit" >/dev/null 2>&1 || return 1 ;;
-    disabled) systemctl disable "$unit" >/dev/null 2>&1 || return 1 ;;
-    static|indirect|generated|transient|masked|masked-runtime) : ;;
-  esac
+    enabled|enabled-runtime|disabled|masked|masked-runtime)
+      backup_normalize_service_unit_state "$unit"
+      case "$enabled" in
+        enabled) systemctl enable "$unit" >/dev/null 2>&1 || return 1 ;;
+        enabled-runtime) systemctl enable --runtime "$unit" >/dev/null 2>&1 || return 1 ;;
+      esac
 
-  case "$active" in
-    active)
-      if [[ "$restart_active" == "1" ]]; then
-        systemctl restart "$unit" >/dev/null 2>&1 || return 1
-      else
-        systemctl start "$unit" >/dev/null 2>&1 || return 1
-      fi
+      backup_restore_service_active "$unit" "$active" "$restart_active" || return 1
+
+      case "$enabled" in
+        masked) systemctl mask "$unit" >/dev/null 2>&1 || return 1 ;;
+        masked-runtime) systemctl mask --runtime "$unit" >/dev/null 2>&1 || return 1 ;;
+      esac
       ;;
-    inactive) systemctl stop "$unit" >/dev/null 2>&1 || return 1 ;;
+    static|indirect|generated|transient)
+      current_enabled="$(backup_current_service_enabled "$unit")" || return 1
+      [[ "$current_enabled" == "$enabled" ]] || return 1
+      backup_restore_service_active "$unit" "$active" "$restart_active" || return 1
+      ;;
   esac
 
-  case "$enabled" in
-    masked) systemctl mask "$unit" >/dev/null 2>&1 || return 1 ;;
-    masked-runtime) systemctl mask --runtime "$unit" >/dev/null 2>&1 || return 1 ;;
-  esac
-
+  current_enabled="$(backup_current_service_enabled "$unit")" || return 1
+  [[ "$current_enabled" == "$enabled" ]] || return 1
+  current_load="$(backup_current_service_load "$unit")" || return 1
+  case "$current_load" in loaded|masked) ;; *) return 1 ;; esac
   return 0
 }
 
@@ -560,7 +843,10 @@ restore_captured_state() {
 
 restore_from_dir() {
   local d="$1"
-  [[ -d "$d" ]] || { err "Backup not found: $d"; return 1; }
+  if ! backup_is_usable_dir "$d"; then
+    err "Backup is incomplete, invalid, or not a recognized SSO snapshot: $d"
+    return 1
+  fi
 
   warn "Restoring SSO-owned configs from: $d"
   warn "This rollback is limited to files/services created or explicitly captured by SSO."
@@ -777,7 +1063,7 @@ module_rollback_choose() {
   header
   section "Rollback choose backup"
   local list
-  list="$(find "$BACKUP_DIR_BASE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | tail -n 30 || true)"
+  list="$(backup_list_names "$BACKUP_DIR_BASE" | tail -n 30 || true)"
   if [[ -z "${list:-}" ]]; then
     err "No backups found."
     pause; return
