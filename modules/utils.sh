@@ -23,26 +23,29 @@ muted() { say "${c_dim}$*${c_reset}"; }
 line() { say "${c_dim}------------------------------------------------------------${c_reset}"; }
 section() { say "${c_bold}$*${c_reset}"; line; }
 
-# Read from TTY even if script is started via pipe (e.g. curl | bash)
+# Read from TTY even if script is started via pipe (e.g. curl | bash).
+# If neither the TTY nor stdin can provide input, return failure instead of
+# turning EOF into an empty successful read.
 read_input() {
   local prompt="${1:-}"
   local -n __out="$2"
 
   if [[ -n "$prompt" ]]; then
-    if ! printf "%s" "$prompt" >/dev/tty 2>/dev/null; then
-      printf "%s" "$prompt" >&2
+    if ! { printf "%s" "$prompt" >/dev/tty; } 2>/dev/null; then
+      printf "%s" "$prompt" >&2 || return 1
     fi
   fi
 
-  if IFS= read -r __out </dev/tty 2>/dev/null; then
+  if { IFS= read -r __out </dev/tty; } 2>/dev/null; then
     return 0
   fi
-  IFS= read -r __out || true
+
+  IFS= read -r __out
 }
 
 pause() {
-  local _
-  read_input "Press Enter to continue..." _
+  local _=""
+  read_input "Press Enter to continue..." _ || true
 }
 
 prompt_choice() {
@@ -51,11 +54,16 @@ prompt_choice() {
   local ans=""
 
   while true; do
-    if ! printf "\n" >/dev/tty 2>/dev/null; then
+    if ! { printf "\n" >/dev/tty; } 2>/dev/null; then
       printf "\n" >&2
     fi
 
-    read_input "${label}: " ans
+    if ! read_input "${label}: " ans; then
+      # EOF/no controlling TTY is a bounded end-of-input condition. Choosing
+      # menu item 0 makes every current caller exit/back out safely.
+      __out="0"
+      return 0
+    fi
     ans="${ans:-}"
 
     if [[ "$ans" =~ ^[0-9]+$ ]]; then
@@ -63,7 +71,7 @@ prompt_choice() {
       return 0
     fi
 
-    if ! printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty 2>/dev/null; then
+    if ! { printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >/dev/tty; } 2>/dev/null; then
       printf "%b\n" "${c_red}[x]${c_reset} Please enter a number." >&2
     fi
   done
@@ -113,7 +121,6 @@ systemd_disable_now_safe() {
   fi
   return 0
 }
-
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -218,16 +225,3 @@ is_ipv4_cidr() {
   (( mask >= 0 && mask <= 32 )) || return 1
   return 0
 }
-
-validate_ipv4_or_cidr() {
-  local v="${1:-}"
-  [[ -n "$v" ]] || return 1
-  # reject anything with spaces
-  [[ "$v" == "${v//[[:space:]]/}" ]] || return 1
-  if [[ "$v" == */* ]]; then
-    is_ipv4_cidr "$v"
-  else
-    is_ipv4 "$v"
-  fi
-}
-
