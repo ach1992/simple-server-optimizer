@@ -377,12 +377,24 @@ backup_create() {
     || ! backup_capture_cpu_irq "$d" \
     || ! backup_capture_state "$d" \
     || ! backup_capture_fail2ban "$d" \
-    || ! backup_capture_services "$d" \
-    || ! backup_mark "$d" "$tag"; then
-    # Do not attempt recursive cleanup here. A partial cleanup could remove the
-    # quarantine marker before failing and make leftover FORMAT/TAG evidence look
-    # certified. Keeping the failed directory intact is the fail-closed policy.
-    printf 'Backup capture failed; incomplete snapshot remains quarantined at %s and will be ignored.\n' "$d" >&2
+    || ! backup_capture_services "$d"; then
+    # TAG/FORMAT have not been written yet, so cleanup cannot leave a snapshot
+    # that selectors could mistake for certified. If cleanup itself fails, the
+    # remaining directory is still rejected because it lacks TAG and/or carries
+    # INCOMPLETE.
+    if ! rm -rf -- "$d" 2>/dev/null || backup_path_exists "$d"; then
+      printf 'Backup capture failed; uncertified snapshot remains at %s and will be ignored.\n' "$d" >&2
+    else
+      printf 'Backup capture failed; incomplete snapshot was discarded.\n' >&2
+    fi
+    return 1
+  fi
+
+  if ! backup_mark "$d" "$tag"; then
+    # Certification may already have written TAG/FORMAT. Never recursively
+    # clean this path: partial cleanup could remove INCOMPLETE before failing
+    # and make the residue look certified. Preserve the quarantine intact.
+    printf 'Backup certification failed; snapshot remains quarantined at %s and will be ignored.\n' "$d" >&2
     return 1
   fi
 
