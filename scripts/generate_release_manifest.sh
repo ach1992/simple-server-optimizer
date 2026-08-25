@@ -18,8 +18,66 @@ PAYLOAD_FILES=(
   assets/blocklist-ip.ipv4
 )
 
+payload_path_is_safe() {
+  local rel="$1" current="$ROOT_DIR" parent component
+  local -a components=()
+  parent="${rel%/*}"
+  if [[ "$parent" != "$rel" ]]; then
+    IFS='/' read -r -a components <<< "$parent"
+    for component in "${components[@]}"; do
+      [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || return 1
+      current="$current/$component"
+      [[ -d "$current" && ! -L "$current" ]] || return 1
+    done
+  fi
+  [[ -f "$ROOT_DIR/$rel" && ! -L "$ROOT_DIR/$rel" && -s "$ROOT_DIR/$rel" ]]
+}
+
+manifest_paths_match_payload() {
+  local manifest="$1" expected actual
+  expected="$(mktemp)" || return 1
+  actual="$(mktemp)" || { rm -f -- "$expected"; return 1; }
+  printf '%s\n' "${PAYLOAD_FILES[@]}" | LC_ALL=C sort > "$expected"
+  if ! awk '
+    NF != 2 { exit 1 }
+    $1 !~ /^[0-9a-fA-F]{64}$/ { exit 1 }
+    { path=$2; sub(/^\*/, "", path); print path }
+  ' "$manifest" | LC_ALL=C sort > "$actual"; then
+    rm -f -- "$expected" "$actual"
+    return 1
+  fi
+  cmp -s -- "$expected" "$actual"
+  local rc=$?
+  rm -f -- "$expected" "$actual"
+  return "$rc"
+}
+
+validate_manifest_destination() {
+  local destination="$1"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || return 1
+  fi
+}
+
+restore_previous_manifest() {
+  local previous="$1" destination="$2"
+  if [[ -n "$previous" && -f "$previous" && ! -L "$previous" ]]; then
+    if validate_manifest_destination "$destination"; then
+      mv -fT -- "$previous" "$destination" >/dev/null 2>&1 || return 1
+      [[ -f "$destination" && ! -L "$destination" && ! -e "$previous" ]]
+      return
+    fi
+    return 1
+  fi
+
+  if [[ -f "$destination" && ! -L "$destination" ]]; then
+    rm -f -- "$destination" || return 1
+  fi
+  [[ ! -e "$destination" && ! -L "$destination" ]]
+}
+
 for f in "${PAYLOAD_FILES[@]}"; do
-  [[ -f "$f" && ! -L "$f" && -s "$f" ]] || {
+  payload_path_is_safe "$f" || {
     printf 'Missing or unsafe release payload file: %s\n' "$f" >&2
     exit 1
   }
@@ -30,15 +88,68 @@ if [[ -L release || ( -e release && ! -d release ) ]]; then
   exit 1
 fi
 mkdir -p release
+
+manifest_path="release/SHA256SUMS"
+validate_manifest_destination "$manifest_path" || {
+  printf 'Refusing unsafe release checksum destination.\n' >&2
+  exit 1
+}
+
 manifest_tmp="$(mktemp release/.SHA256SUMS.XXXXXX)" || exit 1
-if ! sha256sum "${PAYLOAD_FILES[@]}" > "$manifest_tmp"; then
-  rm -f -- "$manifest_tmp"
-  printf 'Could not generate release checksums.\n' >&2
+previous_tmp=""
+verify_tmp=""
+cleanup() {
+  [[ -z "$manifest_tmp" ]] || rm -f -- "$manifest_tmp" 2>/dev/null || true
+  [[ -z "$previous_tmp" ]] || rm -f -- "$previous_tmp" 2>/dev/null || true
+  [[ -z "$verify_tmp" ]] || rm -f -- "$verify_tmp" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+if [[ -f "$manifest_path" && ! -L "$manifest_path" ]]; then
+  previous_tmp="$(mktemp release/.SHA256SUMS.previous.XXXXXX)" || exit 1
+  cp -p -- "$manifest_path" "$previous_tmp" || exit 1
+fi
+
+if ! sha256sum "${PAYLOAD_FILES[@]}" > "$manifest_tmp" \
+  || [[ ! -f "$manifest_tmp" || -L "$manifest_tmp" || ! -s "$manifest_tmp" ]] \
+  || ! manifest_paths_match_payload "$manifest_tmp"; then
+  printf 'Could not generate a complete release checksum manifest.\n' >&2
   exit 1
 fi
-if ! mv -f -- "$manifest_tmp" release/SHA256SUMS; then
-  rm -f -- "$manifest_tmp"
+
+verify_tmp="$(mktemp release/.SHA256SUMS.verify.XXXXXX)" || exit 1
+cp -- "$manifest_tmp" "$verify_tmp" || exit 1
+
+validate_manifest_destination "$manifest_path" || {
+  printf 'Release checksum destination changed to an unsafe type before publication.\n' >&2
+  exit 1
+}
+
+if ! mv -fT -- "$manifest_tmp" "$manifest_path"; then
   printf 'Could not publish release checksum manifest.\n' >&2
   exit 1
 fi
+if [[ -e "$manifest_tmp" || -L "$manifest_tmp" ]]; then
+  printf 'Release checksum publication reported success without consuming the staging file.\n' >&2
+  exit 1
+fi
+manifest_tmp=""
+
+if [[ ! -f "$manifest_path" || -L "$manifest_path" ]] \
+  || ! cmp -s -- "$manifest_path" "$verify_tmp" \
+  || ! manifest_paths_match_payload "$manifest_path"; then
+  printf 'Published release checksum manifest failed postcondition verification.\n' >&2
+  if ! restore_previous_manifest "$previous_tmp" "$manifest_path"; then
+    printf 'Previous manifest could not be restored automatically.\n' >&2
+  else
+    previous_tmp=""
+  fi
+  exit 1
+fi
+
+rm -f -- "$verify_tmp"
+verify_tmp=""
+rm -f -- "$previous_tmp" 2>/dev/null || true
+previous_tmp=""
+trap - EXIT
 printf 'Wrote release/SHA256SUMS for %d payload files.\n' "${#PAYLOAD_FILES[@]}"

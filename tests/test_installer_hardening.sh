@@ -18,6 +18,31 @@ make_installed_payload() {
   done
 }
 
+
+make_lookalike_payload() {
+  local root="$1" f
+  for f in \
+    install.sh sso.sh \
+    modules/utils.sh modules/network.sh modules/cpu_irq.sh modules/firewall.sh \
+    modules/fail2ban.sh modules/rollback.sh modules/uninstall.sh \
+    assets/whitelist-default.ipv4 assets/blocklist-ip.ipv4; do
+    mkdir -p "$root/$(dirname "$f")"
+    printf 'operator-owned-lookalike:%s\n' "$f" > "$root/$f"
+  done
+}
+
+make_release_fixture() {
+  local root="$1"
+  make_installed_payload "$root"
+  mkdir -p "$root/release"
+  (
+    cd "$root" || exit 1
+    sha256sum install.sh sso.sh modules/utils.sh modules/network.sh modules/cpu_irq.sh \
+      modules/firewall.sh modules/fail2ban.sh modules/rollback.sh modules/uninstall.sh \
+      assets/whitelist-default.ipv4 assets/blocklist-ip.ipv4 > release/SHA256SUMS
+  )
+}
+
 test_runtime_paths_are_canonical_and_persistence_is_independent() {
   local tmp
   tmp="$(mktemp -d)" || return 1
@@ -172,6 +197,69 @@ test_payload_and_manifest_reject_symlinks() {
   return "$rc"
 }
 
+test_manifest_verifier_rejects_unsafe_runtime_file_types() {
+  local tmp variant fixture target external
+  tmp="$(mktemp -d)" || return 1
+
+  for variant in symlink-identical dangling-symlink directory fifo missing empty; do
+    fixture="$tmp/$variant"
+    make_release_fixture "$fixture"
+    target="$fixture/modules/network.sh"
+    case "$variant" in
+      symlink-identical)
+        external="$tmp/network-identical"
+        cp -a "$target" "$external"
+        rm -f "$target"
+        ln -s "$external" "$target"
+        ;;
+      dangling-symlink)
+        rm -f "$target"
+        ln -s "$tmp/does-not-exist" "$target"
+        ;;
+      directory)
+        rm -f "$target"
+        mkdir "$target"
+        ;;
+      fifo)
+        rm -f "$target"
+        mkfifo "$target"
+        ;;
+      missing)
+        rm -f "$target"
+        ;;
+      empty)
+        : > "$target"
+        ;;
+    esac
+
+    if ROOT_DIR="$ROOT_DIR" FIXTURE="$fixture" bash -c '
+      set -Eeuo pipefail
+      export SSO_INSTALL_LIB_ONLY=1
+      source "$ROOT_DIR/install.sh"
+      verify_release_manifest "$FIXTURE"
+    ' >/dev/null 2>&1; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  done
+
+  fixture="$tmp/parent-symlink"
+  make_release_fixture "$fixture"
+  mv "$fixture/modules" "$tmp/external-modules"
+  ln -s "$tmp/external-modules" "$fixture/modules"
+  if ROOT_DIR="$ROOT_DIR" FIXTURE="$fixture" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    source "$ROOT_DIR/install.sh"
+    verify_release_manifest "$FIXTURE"
+  ' >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  rm -rf "$tmp"
+}
+
 test_failed_curl_cannot_succeed_with_partial_output() {
   local tmp
   tmp="$(mktemp -d)" || return 1
@@ -195,6 +283,167 @@ test_failed_curl_cannot_succeed_with_partial_output() {
   return "$rc"
 }
 
+test_pre_activation_failure_matrix_preserves_current_install() {
+  local tmp mode case_root
+  tmp="$(mktemp -d)" || return 1
+
+  for mode in stage-mktemp copy chmod validation marker backup-remove current-to-backup; do
+    case_root="$tmp/$mode"
+    make_installed_payload "$case_root/install"
+    printf 'previous-%s\n' "$mode" > "$case_root/install/PREVIOUS"
+    if [[ "$mode" == "backup-remove" ]]; then
+      make_installed_payload "$case_root/install.bak"
+      printf 'old-backup\n' > "$case_root/install.bak/OLD_BACKUP"
+    fi
+
+    ROOT_DIR="$ROOT_DIR" CASE_ROOT="$case_root" MODE="$mode" bash -c '
+      set -Eeuo pipefail
+      export SSO_INSTALL_LIB_ONLY=1
+      export SSO_INSTALL_DIR="$CASE_ROOT/install"
+      export SSO_STATE_DIR="$CASE_ROOT/state"
+      export SSO_LAUNCHER_PATH="$CASE_ROOT/bin/sso"
+      source "$ROOT_DIR/install.sh"
+      err() { :; }
+      info() { :; }
+      ok() { :; }
+
+      case "$MODE" in
+        stage-mktemp)
+          mktemp() {
+            if [[ "$*" == *"$INSTALL_DIR.new."* ]]; then : > "$CASE_ROOT/INJECTED"; return 81; fi
+            command mktemp "$@"
+          }
+          ;;
+        copy)
+          cp() {
+            local destination="${@: -1}" source="${@: -2:1}"
+            if [[ "$destination" == "$INSTALL_DIR.new."*/modules/network.sh && "$source" == */modules/network.sh ]]; then
+              : > "$CASE_ROOT/INJECTED"; return 82
+            fi
+            command cp "$@"
+          }
+          ;;
+        chmod)
+          chmod() {
+            if [[ "${1:-}" == "+x" && "${2:-}" == "$INSTALL_DIR.new."*/install.sh ]]; then
+              : > "$CASE_ROOT/INJECTED"; return 83
+            fi
+            command chmod "$@"
+          }
+          ;;
+        validation)
+          eval "$(declare -f validate_payload | sed "1s/validate_payload/original_validate_payload/")"
+          validate_calls=0
+          validate_payload() {
+            validate_calls=$((validate_calls + 1))
+            if [[ "$validate_calls" -eq 2 ]]; then : > "$CASE_ROOT/INJECTED"; return 84; fi
+            original_validate_payload "$@"
+          }
+          ;;
+        marker)
+          chmod() {
+            if [[ "${1:-}" == "0644" && "${2:-}" == "$INSTALL_DIR.new."*/.sso-managed-install ]]; then
+              : > "$CASE_ROOT/INJECTED"; return 85
+            fi
+            command chmod "$@"
+          }
+          ;;
+        backup-remove)
+          rm() {
+            local arg
+            for arg in "$@"; do
+              if [[ "$arg" == "$INSTALL_DIR.bak" ]]; then : > "$CASE_ROOT/INJECTED"; return 86; fi
+            done
+            command rm "$@"
+          }
+          ;;
+        current-to-backup)
+          mv() {
+            local destination="${@: -1}" source="${@: -2:1}"
+            if [[ "$source" == "$INSTALL_DIR" && "$destination" == "$INSTALL_DIR.bak" ]]; then
+              : > "$CASE_ROOT/INJECTED"; return 87
+            fi
+            command mv "$@"
+          }
+          ;;
+      esac
+
+      if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+      [[ -f "$CASE_ROOT/INJECTED" ]]
+      [[ -f "$INSTALL_DIR/PREVIOUS" ]]
+      if [[ "$MODE" == "backup-remove" ]]; then
+        [[ -f "$INSTALL_DIR.bak/OLD_BACKUP" ]]
+      else
+        [[ ! -e "$INSTALL_DIR.bak" ]]
+      fi
+      ! compgen -G "$INSTALL_DIR.new.*" >/dev/null
+    ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+  done
+
+  rm -rf "$tmp"
+}
+
+test_state_temp_creation_failure_rolls_back_to_previous_install() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_installed_payload "$tmp/install"
+  printf 'previous\n' > "$tmp/install/PREVIOUS"
+
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    mktemp() {
+      if [[ "$*" == *"$STATE_DIR/.install_dir."* ]]; then : > "$TMPROOT/STATE_TEMP_FAILED"; return 88; fi
+      command mktemp "$@"
+    }
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$TMPROOT/STATE_TEMP_FAILED" ]]
+    [[ -f "$INSTALL_DIR/PREVIOUS" && ! -e "$INSTALL_DIR.bak" ]]
+    ! compgen -G "$STATE_DIR/.install_dir.*" >/dev/null
+  ' >/dev/null 2>&1
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_backup_restore_move_failure_preserves_recovery_evidence() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_installed_payload "$tmp/install"
+  printf 'previous\n' > "$tmp/install/PREVIOUS"
+
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    mktemp() {
+      if [[ "$*" == *"$STATE_DIR/.install_dir."* ]]; then : > "$TMPROOT/STATE_TEMP_FAILED"; return 89; fi
+      command mktemp "$@"
+    }
+    mv() {
+      local destination="${@: -1}" source="${@: -2:1}"
+      if [[ "$source" == "$INSTALL_DIR.bak" && "$destination" == "$INSTALL_DIR" ]]; then
+        : > "$TMPROOT/RESTORE_MOVE_FAILED"
+        return 90
+      fi
+      command mv "$@"
+    }
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$TMPROOT/STATE_TEMP_FAILED" && -f "$TMPROOT/RESTORE_MOVE_FAILED" ]]
+    [[ ! -e "$INSTALL_DIR" && -f "$INSTALL_DIR.bak/PREVIOUS" ]]
+  ' >/dev/null 2>&1
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 test_activation_failure_restores_previous_installation() {
   local tmp
   tmp="$(mktemp -d)" || return 1
@@ -211,14 +460,7 @@ test_activation_failure_restores_previous_installation() {
     info() { :; }
     ok() { :; }
     mv() {
-      local src dst
-      if [[ "${1:-}" == "--" ]]; then
-        src="${2:-}"
-        dst="${3:-}"
-      else
-        src="${1:-}"
-        dst="${2:-}"
-      fi
+      local src="${@: -2:1}" dst="${@: -1}"
       if [[ "$src" == "$INSTALL_DIR".new.* && "$dst" == "$INSTALL_DIR" && ! -e "$tmp/ACTIVATION_FAILED" ]]; then
         : > "$tmp/ACTIVATION_FAILED"
         return 73
@@ -231,6 +473,40 @@ test_activation_failure_restores_previous_installation() {
     [[ -f "$INSTALL_DIR/PREVIOUS" ]]
     [[ ! -e "$INSTALL_DIR.bak" ]]
   )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_activation_race_preserves_unrelated_destination_and_previous_backup() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_installed_payload "$tmp/install"
+  printf 'previous\n' > "$tmp/install/PREVIOUS"
+
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    mv() {
+      local destination="${@: -1}" source="${@: -2:1}"
+      if [[ "$source" == "$INSTALL_DIR.new."* && "$destination" == "$INSTALL_DIR" ]]; then
+        mkdir -p "$INSTALL_DIR"
+        printf "operator-race\n" > "$INSTALL_DIR/OPERATOR"
+        : > "$TMPROOT/ACTIVATION_RACE"
+        return 91
+      fi
+      command mv "$@"
+    }
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$TMPROOT/ACTIVATION_RACE" ]]
+    [[ -f "$INSTALL_DIR/OPERATOR" ]]
+    [[ ! -e "$INSTALL_DIR/$INSTALL_MARKER" && ! -L "$INSTALL_DIR/$INSTALL_MARKER" ]]
+    [[ -f "$INSTALL_DIR.bak/PREVIOUS" ]]
+  ' >/dev/null 2>&1
   local rc=$?
   rm -rf "$tmp"
   return "$rc"
@@ -253,18 +529,146 @@ test_rollback_removal_failure_preserves_previous_backup() {
     rm() {
       local arg
       for arg in "$@"; do
-        if [[ "$arg" == "$INSTALL_DIR" ]]; then return 74; fi
+        if [[ "$arg" == "$INSTALL_DIR" ]]; then
+          : > "$tmp/ROLLBACK_REMOVE_FAILED"
+          return 74
+        fi
       done
       command rm "$@"
     }
 
     if rollback_install_activation 1 "$INSTALL_DIR.bak"; then exit 1; fi
+    [[ -f "$tmp/ROLLBACK_REMOVE_FAILED" ]]
     [[ -f "$INSTALL_DIR/NEW" ]]
     [[ -f "$INSTALL_DIR.bak/PREVIOUS" ]]
   )
   local rc=$?
   rm -rf "$tmp"
   return "$rc"
+}
+
+test_state_publish_destination_types_are_checked_before_rotation() {
+  local tmp variant case_root
+  tmp="$(mktemp -d)" || return 1
+
+  for variant in directory symlink; do
+    case_root="$tmp/$variant"
+    make_installed_payload "$case_root/install"
+    printf 'previous-%s\n' "$variant" > "$case_root/install/PREVIOUS"
+    mkdir -p "$case_root/state"
+    if [[ "$variant" == "directory" ]]; then
+      mkdir "$case_root/state/install_dir"
+    else
+      printf 'operator-state\n' > "$case_root/operator-state"
+      ln -s "$case_root/operator-state" "$case_root/state/install_dir"
+    fi
+
+    if ROOT_DIR="$ROOT_DIR" CASE_ROOT="$case_root" bash -c '
+      set -Eeuo pipefail
+      export SSO_INSTALL_LIB_ONLY=1
+      export SSO_INSTALL_DIR="$CASE_ROOT/install"
+      export SSO_STATE_DIR="$CASE_ROOT/state"
+      export SSO_LAUNCHER_PATH="$CASE_ROOT/bin/sso"
+      source "$ROOT_DIR/install.sh"
+      install_staged_payload "$ROOT_DIR"
+    ' >/dev/null 2>&1; then
+      rm -rf "$tmp"
+      return 1
+    fi
+    [[ -f "$case_root/install/PREVIOUS" && ! -e "$case_root/install.bak" ]] || { rm -rf "$tmp"; return 1; }
+  done
+
+  case_root="$tmp/regular"
+  make_installed_payload "$case_root/install"
+  printf 'previous-regular\n' > "$case_root/install/PREVIOUS"
+  mkdir -p "$case_root/state"
+  printf '%s\n' "$case_root/install" > "$case_root/state/install_dir"
+  ROOT_DIR="$ROOT_DIR" CASE_ROOT="$case_root" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$CASE_ROOT/install"
+    export SSO_STATE_DIR="$CASE_ROOT/state"
+    export SSO_LAUNCHER_PATH="$CASE_ROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    install_staged_payload "$ROOT_DIR"
+    [[ -f "$INSTALL_DIR.bak/PREVIOUS" ]]
+    cmp -s "$STATE_DIR/install_dir" <(printf "%s\n" "$INSTALL_DIR")
+  ' >/dev/null 2>&1
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_state_publish_mv_failure_and_false_success_restore_previous_install() {
+  local tmp mode case_root
+  tmp="$(mktemp -d)" || return 1
+
+  for mode in fail false-success corrupt-success; do
+    case_root="$tmp/$mode"
+    make_installed_payload "$case_root/install"
+    printf 'previous-%s\n' "$mode" > "$case_root/install/PREVIOUS"
+    mkdir -p "$case_root/state"
+    printf '%s\n' "$case_root/install" > "$case_root/state/install_dir"
+
+    ROOT_DIR="$ROOT_DIR" CASE_ROOT="$case_root" MODE="$mode" bash -c '
+      set -Eeuo pipefail
+      export SSO_INSTALL_LIB_ONLY=1
+      export SSO_INSTALL_DIR="$CASE_ROOT/install"
+      export SSO_STATE_DIR="$CASE_ROOT/state"
+      export SSO_LAUNCHER_PATH="$CASE_ROOT/bin/sso"
+      source "$ROOT_DIR/install.sh"
+      mv() {
+        local destination="${@: -1}" source="${@: -2:1}"
+        if [[ "$destination" == "$STATE_DIR/install_dir" && "$source" == "$STATE_DIR/.install_dir."* \
+          && "$source" != "$STATE_DIR/.install_dir.restore."* && "$source" != "$STATE_DIR/.install_dir.previous."* ]]; then
+          : > "$CASE_ROOT/PUBLISH_INJECTED"
+          case "$MODE" in
+            false-success) return 0 ;;
+            fail) return 79 ;;
+            corrupt-success)
+              command mv "$@" || return
+              printf "corrupt-state\n" > "$destination"
+              return 0
+              ;;
+          esac
+        fi
+        command mv "$@"
+      }
+      if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+      [[ -f "$CASE_ROOT/PUBLISH_INJECTED" ]]
+      [[ -f "$INSTALL_DIR/PREVIOUS" && ! -e "$INSTALL_DIR.bak" ]]
+      cmp -s "$STATE_DIR/install_dir" <(printf "%s\n" "$INSTALL_DIR")
+      ! compgen -G "$STATE_DIR/.install_dir.*" >/dev/null
+    ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+  done
+
+  case_root="$tmp/first-install-corrupt-success"
+  mkdir -p "$case_root/state"
+  ROOT_DIR="$ROOT_DIR" CASE_ROOT="$case_root" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$CASE_ROOT/install"
+    export SSO_STATE_DIR="$CASE_ROOT/state"
+    export SSO_LAUNCHER_PATH="$CASE_ROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    mv() {
+      local destination="${@: -1}" source="${@: -2:1}"
+      if [[ "$destination" == "$STATE_DIR/install_dir" && "$source" == "$STATE_DIR/.install_dir."* \
+          && "$source" != "$STATE_DIR/.install_dir.restore."* && "$source" != "$STATE_DIR/.install_dir.previous."* ]]; then
+        : > "$CASE_ROOT/PUBLISH_INJECTED"
+        command mv "$@" || return
+        printf "corrupt-state\n" > "$destination"
+        return 0
+      fi
+      command mv "$@"
+    }
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$CASE_ROOT/PUBLISH_INJECTED" ]]
+    [[ ! -e "$INSTALL_DIR" && ! -e "$INSTALL_DIR.bak" && ! -e "$STATE_DIR/install_dir" ]]
+    ! compgen -G "$STATE_DIR/.install_dir.*" >/dev/null
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp"
 }
 
 test_finish_install_propagates_run_failure() {
@@ -316,6 +720,133 @@ test_unrecognized_install_and_backup_are_preserved() {
     if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
     [[ -f "$INSTALL_DIR.bak/KEEP" && ! -e "$INSTALL_DIR" ]]
   )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_install_ownership_requires_positive_identity() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+
+  make_lookalike_payload "$tmp/install"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    err() { :; }
+    if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$INSTALL_DIR/install.sh" && ! -e "$INSTALL_DIR.bak" ]]
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp/install"
+  make_lookalike_payload "$tmp/install"
+  cp -a "$ROOT_DIR/install.sh" "$tmp/install/install.sh"
+  cp -a "$ROOT_DIR/sso.sh" "$tmp/install/sso.sh"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp/install"
+  make_installed_payload "$tmp/install"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    installation_is_sso_owned "$INSTALL_DIR"
+    write_managed_install_marker "$INSTALL_DIR"
+    managed_install_marker_is_valid "$INSTALL_DIR"
+    installation_is_sso_owned "$INSTALL_DIR"
+
+    printf "corrupt\n" > "$INSTALL_DIR/$INSTALL_MARKER"
+    if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+
+    rm -f "$INSTALL_DIR/$INSTALL_MARKER"
+    printf "marker-target\n" > "$TMPROOT/marker-target"
+    ln -s "$TMPROOT/marker-target" "$INSTALL_DIR/$INSTALL_MARKER"
+    if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+
+    rm -f "$INSTALL_DIR/$INSTALL_MARKER"
+    mkdir "$INSTALL_DIR/$INSTALL_MARKER"
+    if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+  ' >/dev/null 2>&1
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_backup_ownership_and_orphan_recovery_fail_closed() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_installed_payload "$tmp/install"
+  printf 'current-evidence\n' > "$tmp/install/CURRENT"
+  make_lookalike_payload "$tmp/install.bak"
+  printf 'operator-backup\n' > "$tmp/install.bak/KEEP"
+
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    err() { :; }
+    if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$INSTALL_DIR/CURRENT" && -f "$INSTALL_DIR.bak/KEEP" ]]
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp/install" "$tmp/install.bak"
+  make_installed_payload "$tmp/install.bak"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    if validate_existing_install_state >/dev/null 2>&1; then exit 1; fi
+    [[ -f "$INSTALL_DIR.bak/sso.sh" && ! -e "$INSTALL_DIR" ]]
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp/install.bak"
+  make_installed_payload "$tmp/real-install"
+  ln -s "$tmp/real-install" "$tmp/install"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    if validate_existing_install_state >/dev/null 2>&1; then exit 1; fi
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  rm -f "$tmp/install"
+  make_installed_payload "$tmp/install"
+  make_installed_payload "$tmp/real-backup"
+  ln -s "$tmp/real-backup" "$tmp/install.bak"
+  ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$TMPROOT/install"
+    export SSO_STATE_DIR="$TMPROOT/state"
+    export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    if validate_existing_install_state >/dev/null 2>&1; then exit 1; fi
+  ' >/dev/null 2>&1
   local rc=$?
   rm -rf "$tmp"
   return "$rc"
@@ -394,11 +925,12 @@ test_manifest_generator_rejects_symlink_payload() {
 }
 
 test_manifest_generator_failure_preserves_previous_manifest() {
-  local tmp
+  local tmp before
   tmp="$(mktemp -d)" || return 1
   generator_fixture "$tmp/repo"
-  mkdir -p "$tmp/repo/release" "$tmp/bin"
-  printf 'previous-manifest\n' > "$tmp/repo/release/SHA256SUMS"
+  "$tmp/repo/scripts/generate_release_manifest.sh" >/dev/null || { rm -rf "$tmp"; return 1; }
+  before="$(cat "$tmp/repo/release/SHA256SUMS")"
+  mkdir -p "$tmp/bin"
   cat > "$tmp/bin/sha256sum" <<'MOCK'
 #!/usr/bin/env bash
 printf 'partial-output\n'
@@ -409,22 +941,99 @@ MOCK
     rm -rf "$tmp"
     return 1
   fi
-  [[ "$(cat "$tmp/repo/release/SHA256SUMS")" == 'previous-manifest' ]]
+  [[ "$(cat "$tmp/repo/release/SHA256SUMS")" == "$before" ]]
   local rc=$?
   rm -rf "$tmp"
   return "$rc"
 }
 
+test_manifest_generator_rejects_directory_and_symlink_destinations() {
+  local tmp case_root
+  tmp="$(mktemp -d)" || return 1
+
+  case_root="$tmp/directory"
+  generator_fixture "$case_root"
+  mkdir -p "$case_root/release/SHA256SUMS"
+  if "$case_root/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then rm -rf "$tmp"; return 1; fi
+  [[ -d "$case_root/release/SHA256SUMS" && ! -L "$case_root/release/SHA256SUMS" ]] || { rm -rf "$tmp"; return 1; }
+
+  case_root="$tmp/symlink"
+  generator_fixture "$case_root"
+  mkdir -p "$case_root/release"
+  printf 'operator-manifest\n' > "$case_root/operator-manifest"
+  ln -s "$case_root/operator-manifest" "$case_root/release/SHA256SUMS"
+  if "$case_root/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then rm -rf "$tmp"; return 1; fi
+  [[ -L "$case_root/release/SHA256SUMS" && "$(cat "$case_root/operator-manifest")" == 'operator-manifest' ]] || { rm -rf "$tmp"; return 1; }
+
+  rm -rf "$tmp"
+}
+
+test_manifest_generator_mv_failure_and_false_success_preserve_previous_manifest() {
+  local tmp mode case_root before
+  tmp="$(mktemp -d)" || return 1
+  for mode in fail false-success corrupt-success; do
+    case_root="$tmp/$mode"
+    generator_fixture "$case_root"
+    "$case_root/scripts/generate_release_manifest.sh" >/dev/null || { rm -rf "$tmp"; return 1; }
+    before="$(cat "$case_root/release/SHA256SUMS")"
+    mkdir -p "$case_root/bin"
+    cat > "$case_root/bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+destination="${@: -1}"
+source="${@: -2:1}"
+if [[ "$destination" == "release/SHA256SUMS" && "$source" == release/.SHA256SUMS.* \
+  && "$source" != release/.SHA256SUMS.previous.* && "$source" != release/.SHA256SUMS.verify.* ]]; then
+  : > "$MV_FLAG"
+  case "$MV_MODE" in
+    false-success) exit 0 ;;
+    fail) exit 77 ;;
+    corrupt-success)
+      /usr/bin/mv "$@"
+      printf 'corrupt-manifest\n' > "$destination"
+      exit 0
+      ;;
+  esac
+fi
+exec /usr/bin/mv "$@"
+MOCK
+    chmod +x "$case_root/bin/mv"
+    if MV_FLAG="$case_root/MV_INJECTED" MV_MODE="$mode" PATH="$case_root/bin:$PATH" \
+      "$case_root/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then
+      rm -rf "$tmp"
+      return 1
+    fi
+    [[ -f "$case_root/MV_INJECTED" ]] || { rm -rf "$tmp"; return 1; }
+    [[ "$(cat "$case_root/release/SHA256SUMS")" == "$before" ]] || { rm -rf "$tmp"; return 1; }
+    if find "$case_root/release" -maxdepth 1 -type f -name '.SHA256SUMS.*' -print -quit | grep -q .; then
+      rm -rf "$tmp"
+      return 1
+    fi
+  done
+  rm -rf "$tmp"
+}
+
 run_test "runtime paths are canonical and durable state/launcher stay outside replaceable trees" test_runtime_paths_are_canonical_and_persistence_is_independent
 run_test "finish_install runs only after successful install/download" test_finish_install_only_runs_after_success
 run_test "runtime payload and checksum manifest reject symlink metadata" test_payload_and_manifest_reject_symlinks
+run_test "manifest verification rejects symlink, dangling, directory, FIFO, missing, empty, and parent-symlink payloads" test_manifest_verifier_rejects_unsafe_runtime_file_types
 run_test "curl failure cannot be hidden by a partial nonempty output" test_failed_curl_cannot_succeed_with_partial_output
+run_test "staging/copy/chmod/validation/marker/backup-rotation failures preserve the current install" test_pre_activation_failure_matrix_preserves_current_install
+run_test "state temp creation failure rolls back to the previous install" test_state_temp_creation_failure_rolls_back_to_previous_install
+run_test "failed backup restore move preserves the recovery backup" test_backup_restore_move_failure_preserves_recovery_evidence
 run_test "activation failure restores the previous installation" test_activation_failure_restores_previous_installation
+run_test "activation race preserves an unrelated destination and the prior recovery backup" test_activation_race_preserves_unrelated_destination_and_previous_backup
 run_test "rollback removal failure preserves the previous backup evidence" test_rollback_removal_failure_preserves_previous_backup
+run_test "state publication rejects directory/symlink destinations before rotating a valid install" test_state_publish_destination_types_are_checked_before_rotation
+run_test "state publication failure, false success, and postcondition corruption roll back safely" test_state_publish_mv_failure_and_false_success_restore_previous_install
 run_test "finish_install propagates a failed SSO launch" test_finish_install_propagates_run_failure
 run_test "unrecognized install and recovery paths are preserved" test_unrecognized_install_and_backup_are_preserved
+run_test "install ownership requires a managed marker or narrow multi-file legacy identity" test_install_ownership_requires_positive_identity
+run_test "backup ownership, orphan backups, and install/backup symlinks fail closed" test_backup_ownership_and_orphan_recovery_fail_closed
 run_test "trusted online source ignores environment redirects" test_online_trust_source_ignores_environment_redirects
 run_test "production runtime paths ignore environment redirects" test_production_paths_ignore_environment_redirects
 run_test "manifest generator rejects symlinked runtime payload" test_manifest_generator_rejects_symlink_payload
+run_test "manifest generator rejects directory and symlink checksum destinations" test_manifest_generator_rejects_directory_and_symlink_destinations
+run_test "manifest publication failure, false success, and postcondition corruption preserve the previous valid manifest" test_manifest_generator_mv_failure_and_false_success_preserve_previous_manifest
 run_test "manifest generation failure preserves the previous manifest" test_manifest_generator_failure_preserves_previous_manifest
 finish_tests

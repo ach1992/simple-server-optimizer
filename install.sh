@@ -38,6 +38,11 @@ PAYLOAD_FILES=(
   assets/blocklist-ip.ipv4
 )
 
+INSTALL_MARKER=".sso-managed-install"
+INSTALL_MARKER_SCHEMA="sso-managed-install-v1"
+LAUNCHER_MANAGED_MARKER="# Managed by Simple Server Optimizer."
+LAUNCHER_SCHEMA_MARKER="# SSO Launcher Schema: 1"
+
 c_reset="\033[0m"
 c_red="\033[31m"
 c_grn="\033[32m"
@@ -95,18 +100,80 @@ path_is_within() {
   [[ "$child" == "$parent" || "$child" == "$parent/"* ]]
 }
 
+render_current_launcher() {
+  local state_file_quoted fallback_install_quoted
+  printf -v state_file_quoted '%q' "$STATE_DIR/install_dir"
+  printf -v fallback_install_quoted '%q' "$INSTALL_DIR"
+  cat <<LAUNCHER_SCRIPT
+#!/usr/bin/env bash
+${LAUNCHER_MANAGED_MARKER}
+${LAUNCHER_SCHEMA_MARKER}
+set -Eeuo pipefail
+INSTALL_DIR_FILE=$state_file_quoted
+FALLBACK_INSTALL_DIR=$fallback_install_quoted
+if [[ -r "\$INSTALL_DIR_FILE" ]]; then
+  INSTALL_DIR="\$(cat "\$INSTALL_DIR_FILE")"
+else
+  INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+fi
+[[ -n "\$INSTALL_DIR" ]] || INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+exec bash "\${INSTALL_DIR}/sso.sh" "\$@"
+LAUNCHER_SCRIPT
+}
+
+render_transitional_launcher() {
+  local state_file_quoted fallback_install_quoted
+  printf -v state_file_quoted '%q' "$STATE_DIR/install_dir"
+  printf -v fallback_install_quoted '%q' "$INSTALL_DIR"
+  cat <<LAUNCHER_SCRIPT
+#!/usr/bin/env bash
+${LAUNCHER_MANAGED_MARKER}
+set -Eeuo pipefail
+INSTALL_DIR_FILE=$state_file_quoted
+FALLBACK_INSTALL_DIR=$fallback_install_quoted
+if [[ -r "\$INSTALL_DIR_FILE" ]]; then
+  INSTALL_DIR="\$(cat "\$INSTALL_DIR_FILE")"
+else
+  INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+fi
+[[ -n "\$INSTALL_DIR" ]] || INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
+exec bash "\${INSTALL_DIR}/sso.sh" "\$@"
+LAUNCHER_SCRIPT
+}
+
+render_legacy_launcher() {
+  cat <<'LAUNCHER_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+INSTALL_DIR_FILE="/etc/sso/install_dir"
+if [[ -r "$INSTALL_DIR_FILE" ]]; then
+  INSTALL_DIR="$(cat "$INSTALL_DIR_FILE" 2>/dev/null || true)"
+else
+  INSTALL_DIR="/root/simple-server-optimizer"
+fi
+exec bash "${INSTALL_DIR}/sso.sh" "$@"
+LAUNCHER_SCRIPT
+}
+
+launcher_matches_render() {
+  local launcher="$1"
+  local render_fn="$2"
+  cmp -s -- "$launcher" <( "$render_fn" )
+}
+
+launcher_is_current_sso_owned() {
+  local launcher="$1"
+  [[ -f "$launcher" && ! -L "$launcher" ]] || return 1
+  launcher_matches_render "$launcher" render_current_launcher
+}
+
 launcher_is_sso_owned() {
   local launcher="$1"
   [[ -f "$launcher" && ! -L "$launcher" ]] || return 1
-  if grep -Fq '# Managed by Simple Server Optimizer.' "$launcher" 2>/dev/null; then
-    return 0
-  fi
-
-  # Compatibility with the launcher emitted by the pre-v1.1.0 installer.
-  grep -Fq 'INSTALL_DIR_FILE=' "$launcher" 2>/dev/null \
-    && grep -Fq 'exec bash "${INSTALL_DIR}/sso.sh" "$@"' "$launcher" 2>/dev/null
+  launcher_matches_render "$launcher" render_current_launcher \
+    || launcher_matches_render "$launcher" render_transitional_launcher \
+    || launcher_matches_render "$launcher" render_legacy_launcher
 }
-
 validate_runtime_paths() {
   local p
   for p in "$INSTALL_DIR" "$STATE_DIR" "$LAUNCHER_PATH"; do
@@ -167,14 +234,87 @@ ensure_tools() {
   command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1
 }
 
+payload_path_is_safe() {
+  local root="$1"
+  local rel="$2"
+  local current="$root" parent component
+  local -a components=()
+
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  [[ -n "$rel" && "$rel" != /* && "$rel" != *$'\n'* && "$rel" != *$'\r'* ]] || return 1
+
+  parent="${rel%/*}"
+  if [[ "$parent" != "$rel" ]]; then
+    IFS='/' read -r -a components <<< "$parent"
+    for component in "${components[@]}"; do
+      [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || return 1
+      current="$current/$component"
+      [[ -d "$current" && ! -L "$current" ]] || return 1
+    done
+  fi
+
+  [[ -f "$root/$rel" && ! -L "$root/$rel" && -s "$root/$rel" ]]
+}
+
 has_payload() {
   local root="$1"
   local f
   for f in "${PAYLOAD_FILES[@]}"; do
-    [[ -f "$root/$f" && ! -L "$root/$f" && -s "$root/$f" ]] || return 1
+    payload_path_is_safe "$root" "$f" || return 1
   done
 }
 
+managed_install_marker_expected() {
+  printf 'schema=%s\nrepository=%s\n' "$INSTALL_MARKER_SCHEMA" "$REPO_SLUG"
+}
+
+managed_install_marker_is_valid() {
+  local root="$1"
+  local marker="$root/$INSTALL_MARKER"
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  cmp -s -- "$marker" <(managed_install_marker_expected)
+}
+
+legacy_install_is_sso_owned() {
+  local root="$1"
+  has_payload "$root" || return 1
+
+  grep -Fxq '#!/usr/bin/env bash' "$root/install.sh" 2>/dev/null \
+    && grep -Fxq 'REPO_SLUG="ach1992/simple-server-optimizer"' "$root/install.sh" 2>/dev/null \
+    && grep -Fxq 'INSTALL_DIR="/root/simple-server-optimizer"' "$root/install.sh" 2>/dev/null \
+    && grep -Fxq 'REPO_URL="https://github.com/ach1992/simple-server-optimizer"' "$root/sso.sh" 2>/dev/null \
+    && grep -Fq 'source "$MODULES_DIR/utils.sh"' "$root/sso.sh" 2>/dev/null \
+    && grep -Fq 'systemd_load_state() {' "$root/modules/utils.sh" 2>/dev/null \
+    && grep -Fq 'module_network_enable_fq_bbr() {' "$root/modules/network.sh" 2>/dev/null \
+    && grep -Fq 'backup_create() {' "$root/modules/rollback.sh" 2>/dev/null
+}
+
+installation_is_sso_owned() {
+  local root="$1"
+  local marker="$root/$INSTALL_MARKER"
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  has_payload "$root" || return 1
+
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    managed_install_marker_is_valid "$root"
+    return
+  fi
+
+  legacy_install_is_sso_owned "$root"
+}
+
+write_managed_install_marker() {
+  local root="$1"
+  local marker="$root/$INSTALL_MARKER"
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  [[ ! -e "$marker" && ! -L "$marker" ]] || return 1
+
+  if ! managed_install_marker_expected > "$marker" || ! chmod 0644 "$marker"; then
+    rm -f -- "$marker" 2>/dev/null || true
+    return 1
+  fi
+  managed_install_marker_is_valid "$root"
+}
 has_local_payload() {
   has_payload "$SOURCE_DIR"
 }
@@ -208,9 +348,8 @@ validate_existing_install_state() {
   local has_current=0
 
   if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
-    [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] || return 1
-    has_payload "$INSTALL_DIR" || {
-      err "Refusing to replace an existing directory that is not a complete SSO installation: $INSTALL_DIR"
+    installation_is_sso_owned "$INSTALL_DIR" || {
+      err "Refusing to replace an existing path without positive SSO installation ownership: $INSTALL_DIR"
       return 1
     }
     has_current=1
@@ -221,13 +360,12 @@ validate_existing_install_state() {
       err "A recovery backup exists without a live SSO installation; recover or move it before reinstalling: $backup"
       return 1
     }
-    [[ -d "$backup" && ! -L "$backup" ]] && has_payload "$backup" || {
-      err "Refusing to delete or replace an unrecognized recovery path: $backup"
+    installation_is_sso_owned "$backup" || {
+      err "Refusing to delete or replace a recovery path without positive SSO installation ownership: $backup"
       return 1
     }
   fi
 }
-
 curl_fetch() {
   local url="$1"
   local out="$2"
@@ -242,11 +380,51 @@ curl_fetch() {
   }
 }
 
-validate_release_ref() {
-  local ref="$1"
-  [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+semver_identifiers_are_valid() {
+  local identifiers="$1"
+  local reject_numeric_leading_zero="$2"
+  local rest="$identifiers" identifier
+
+  [[ -n "$rest" ]] || return 1
+  while :; do
+    identifier="${rest%%.*}"
+    [[ -n "$identifier" && "$identifier" =~ ^[0-9A-Za-z-]+$ ]] || return 1
+    if [[ "$reject_numeric_leading_zero" == "1" && "$identifier" =~ ^[0-9]+$ \
+      && ${#identifier} -gt 1 && "$identifier" == 0* ]]; then
+      return 1
+    fi
+    [[ "$rest" == *.* ]] || break
+    rest="${rest#*.}"
+    [[ -n "$rest" ]] || return 1
+  done
 }
 
+validate_release_ref() {
+  local ref="$1" version core_pre core prerelease="" build=""
+
+  [[ "$ref" == v* && "$ref" != *$'\n'* && "$ref" != *$'\r'* && "$ref" != *[[:space:]]* \
+    && "$ref" != */* ]] || return 1
+  version="${ref#v}"
+
+  if [[ "$version" == *+* ]]; then
+    [[ "$version" != *+*+* ]] || return 1
+    build="${version#*+}"
+    core_pre="${version%%+*}"
+    semver_identifiers_are_valid "$build" 0 || return 1
+  else
+    core_pre="$version"
+  fi
+
+  if [[ "$core_pre" == *-* ]]; then
+    core="${core_pre%%-*}"
+    prerelease="${core_pre#*-}"
+    semver_identifiers_are_valid "$prerelease" 1 || return 1
+  else
+    core="$core_pre"
+  fi
+
+  [[ "$core" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
 resolve_release_ref() {
   ensure_tools || return 1
   local effective="" prefix ref
@@ -275,45 +453,230 @@ github_api_get() {
     "$url"
 }
 
-json_last_sha() {
-  grep -Eo '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | tail -n1 | grep -Eo '[0-9a-f]{40}'
-}
-
-json_last_type() {
-  grep -Eo '"type"[[:space:]]*:[[:space:]]*"(commit|tag)"' | tail -n1 | sed -E 's/.*"(commit|tag)"/\1/'
+github_object_identity_from_json() {
+  awk '
+    function die() { exit 2 }
+    function ws(c) { return c == " " || c == "\t" || c == "\r" || c == "\n" }
+    function skip_ws(    c) {
+      while (pos <= n) {
+        c = substr(s, pos, 1)
+        if (!ws(c)) break
+        pos++
+      }
+    }
+    function parse_string(    c,e,out,hex) {
+      skip_ws()
+      if (substr(s, pos, 1) != "\"") die()
+      pos++
+      out = ""
+      string_escaped = 0
+      while (pos <= n) {
+        c = substr(s, pos, 1)
+        if (c == "\"") {
+          pos++
+          parsed = out
+          return
+        }
+        if (c == "\\") {
+          string_escaped = 1
+          pos++
+          if (pos > n) die()
+          e = substr(s, pos, 1)
+          if (e == "u") {
+            hex = substr(s, pos + 1, 4)
+            if (length(hex) != 4 || hex !~ /^[0-9A-Fa-f]+$/) die()
+            out = out "\\u" hex
+            pos += 5
+            continue
+          }
+          if (e !~ /^["\\\/bfnrt]$/) die()
+          out = out "\\" e
+          pos++
+          continue
+        }
+        if (c ~ /[[:cntrl:]]/) die()
+        out = out c
+        pos++
+      }
+      die()
+    }
+    function parse_key() {
+      parse_string()
+      if (string_escaped) die()
+      key = parsed
+    }
+    function expect(ch) {
+      skip_ws()
+      if (substr(s, pos, 1) != ch) die()
+      pos++
+    }
+    function skip_value(    c,token) {
+      skip_ws()
+      c = substr(s, pos, 1)
+      if (c == "\"") {
+        parse_string()
+        return
+      }
+      if (c == "{") {
+        skip_object()
+        return
+      }
+      if (c == "[") {
+        skip_array()
+        return
+      }
+      token = ""
+      while (pos <= n) {
+        c = substr(s, pos, 1)
+        if (ws(c) || c == "," || c == "]" || c == "}") break
+        token = token c
+        pos++
+      }
+      if (token !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) die()
+    }
+    function skip_object(    c) {
+      nesting++
+      if (nesting > 32) die()
+      expect("{")
+      skip_ws()
+      if (substr(s, pos, 1) == "}") { pos++; nesting--; return }
+      while (1) {
+        parse_key()
+        expect(":")
+        skip_value()
+        skip_ws()
+        c = substr(s, pos, 1)
+        if (c == "}") { pos++; nesting--; return }
+        if (c != ",") die()
+        pos++
+      }
+    }
+    function skip_array(    c) {
+      nesting++
+      if (nesting > 32) die()
+      expect("[")
+      skip_ws()
+      if (substr(s, pos, 1) == "]") { pos++; nesting--; return }
+      while (1) {
+        skip_value()
+        skip_ws()
+        c = substr(s, pos, 1)
+        if (c == "]") { pos++; nesting--; return }
+        if (c != ",") die()
+        pos++
+      }
+    }
+    function parse_identity_object(    c,value,escaped) {
+      expect("{")
+      identity_sha = ""
+      identity_type = ""
+      seen_sha = seen_type = seen_url = 0
+      skip_ws()
+      if (substr(s, pos, 1) == "}") die()
+      while (1) {
+        parse_key()
+        expect(":")
+        if (key != "sha" && key != "type" && key != "url") die()
+        parse_string()
+        escaped = string_escaped
+        value = parsed
+        if (escaped && (key == "sha" || key == "type")) die()
+        if (key == "sha") {
+          if (++seen_sha != 1) die()
+          identity_sha = value
+        } else if (key == "type") {
+          if (++seen_type != 1) die()
+          identity_type = value
+        } else {
+          if (++seen_url != 1) die()
+        }
+        skip_ws()
+        c = substr(s, pos, 1)
+        if (c == "}") { pos++; break }
+        if (c != ",") die()
+        pos++
+      }
+      if (seen_sha != 1 || seen_type != 1) die()
+      if (identity_sha !~ /^[0-9a-f]+$/ || length(identity_sha) != 40) die()
+      if (identity_type != "commit" && identity_type != "tag") die()
+    }
+    function parse_root(    c) {
+      expect("{")
+      object_count = 0
+      skip_ws()
+      if (substr(s, pos, 1) == "}") die()
+      while (1) {
+        parse_key()
+        expect(":")
+        if (key == "object") {
+          object_count++
+          if (object_count != 1) die()
+          parse_identity_object()
+        } else {
+          skip_value()
+        }
+        skip_ws()
+        c = substr(s, pos, 1)
+        if (c == "}") { pos++; break }
+        if (c != ",") die()
+        pos++
+      }
+      skip_ws()
+      if (pos <= n || object_count != 1) die()
+      print identity_type "\t" identity_sha
+    }
+    { json = json $0 "\n" }
+    END {
+      s = json
+      n = length(s)
+      pos = 1
+      nesting = 0
+      parse_root()
+    }
+  '
 }
 
 resolve_tag_commit_sha() {
   local ref="$1"
   validate_release_ref "$ref" || return 1
 
-  local json type sha depth=0
+  local json identity type sha depth=0
   json="$(github_api_get "https://api.github.com/repos/${REPO_SLUG}/git/ref/tags/${ref}")" || return 1
-  type="$(printf '%s\n' "$json" | json_last_type)"
-  sha="$(printf '%s\n' "$json" | json_last_sha)"
+  identity="$(printf '%s\n' "$json" | github_object_identity_from_json)" || return 1
+  IFS=$'\t' read -r type sha <<< "$identity"
 
   while [[ "$type" == "tag" && "$depth" -lt 5 ]]; do
-    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
     json="$(github_api_get "https://api.github.com/repos/${REPO_SLUG}/git/tags/${sha}")" || return 1
-    type="$(printf '%s\n' "$json" | json_last_type)"
-    sha="$(printf '%s\n' "$json" | json_last_sha)"
+    identity="$(printf '%s\n' "$json" | github_object_identity_from_json)" || return 1
+    IFS=$'\t' read -r type sha <<< "$identity"
     depth=$((depth + 1))
   done
 
   [[ "$type" == "commit" && "$sha" =~ ^[0-9a-f]{40}$ ]] || {
-    err "Release tag did not resolve to a commit SHA."
+    err "Release tag did not resolve to a commit SHA within the allowed annotation depth."
     return 1
   }
   printf '%s\n' "$sha"
 }
-
 verify_release_manifest() {
   local root="$1"
   local manifest="$root/release/SHA256SUMS"
-  [[ -f "$manifest" && ! -L "$manifest" && -s "$manifest" ]] || {
-    err "Release checksum manifest is missing or not a regular file."
+  local f
+
+  [[ -d "$root" && ! -L "$root" ]] || {
+    err "Release payload root is not a regular directory."
     return 1
   }
+  payload_path_is_safe "$root" "release/SHA256SUMS" || {
+    err "Release checksum manifest is missing, empty, symlinked, or has an unsafe parent path."
+    return 1
+  }
+  for f in "${PAYLOAD_FILES[@]}"; do
+    payload_path_is_safe "$root" "$f" || {
+      err "Release payload path is missing, empty, symlinked, or non-regular: $f"
+      return 1
+    }
+  done
 
   local expected actual
   expected="$(mktemp)" || return 1
@@ -351,8 +714,12 @@ verify_release_manifest() {
     err "Release checksum verification failed."
     return 1
   fi
-}
 
+  payload_path_is_safe "$root" "release/SHA256SUMS" || return 1
+  for f in "${PAYLOAD_FILES[@]}"; do
+    payload_path_is_safe "$root" "$f" || return 1
+  done
+}
 download_release_payload() {
   local ref="$1"
   local target="$2"
@@ -391,31 +758,145 @@ stage_local_payload() {
   validate_payload "$target"
 }
 
+validate_regular_publish_destination() {
+  local destination="$1"
+  local label="$2"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || {
+      err "Refusing unsafe $label destination: $destination"
+      return 1
+    }
+  fi
+}
+
+publish_install_dir_state() {
+  local destination="$STATE_DIR/install_dir"
+  local state_tmp="" previous_tmp="" published_identity=""
+
+  validate_regular_publish_destination "$destination" "installation-state" || return 1
+
+  if [[ -f "$destination" && ! -L "$destination" ]]; then
+    previous_tmp="$(mktemp "$STATE_DIR/.install_dir.previous.XXXXXX")" || return 1
+    if ! cp -p -- "$destination" "$previous_tmp" || ! cmp -s -- "$destination" "$previous_tmp"; then
+      rm -f -- "$previous_tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+
+  state_tmp="$(mktemp "$STATE_DIR/.install_dir.XXXXXX")" || {
+    rm -f -- "$previous_tmp" 2>/dev/null || true
+    return 1
+  }
+  if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp"; then
+    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  fi
+  published_identity="$(stat -c '%d:%i' "$state_tmp" 2>/dev/null)" || {
+    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  }
+
+  validate_regular_publish_destination "$destination" "installation-state" || {
+    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  }
+  if ! mv -fT -- "$state_tmp" "$destination"; then
+    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  fi
+
+  if [[ -e "$state_tmp" || -L "$state_tmp" ]]; then
+    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  fi
+
+  if [[ ! -f "$destination" || -L "$destination" ]] \
+    || ! cmp -s -- "$destination" <(printf '%s\n' "$INSTALL_DIR"); then
+    local current_identity=""
+    if [[ -f "$destination" && ! -L "$destination" ]]; then
+      current_identity="$(stat -c '%d:%i' "$destination" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$previous_tmp" ]]; then
+      if [[ -e "$destination" || -L "$destination" ]]; then
+        [[ -f "$destination" && ! -L "$destination" && "$current_identity" == "$published_identity" ]] || {
+          err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
+          return 1
+        }
+      fi
+
+      local restore_tmp
+      restore_tmp="$(mktemp "$STATE_DIR/.install_dir.restore.XXXXXX")" || {
+        err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
+        return 1
+      }
+      if ! cp -p -- "$previous_tmp" "$restore_tmp" \
+        || ! mv -fT -- "$restore_tmp" "$destination" \
+        || [[ -e "$restore_tmp" || -L "$restore_tmp" ]] \
+        || [[ ! -f "$destination" || -L "$destination" ]] \
+        || ! cmp -s -- "$destination" "$previous_tmp"; then
+        rm -f -- "$restore_tmp" 2>/dev/null || true
+        err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
+        return 1
+      fi
+      rm -f -- "$previous_tmp"
+      previous_tmp=""
+    else
+      if [[ -e "$destination" || -L "$destination" ]]; then
+        [[ -f "$destination" && ! -L "$destination" && "$current_identity" == "$published_identity" ]] || return 1
+        rm -f -- "$destination" || return 1
+      fi
+    fi
+    return 1
+  fi
+
+  rm -f -- "$previous_tmp" 2>/dev/null || true
+}
+
+move_owned_install_dir() {
+  local source="$1"
+  local destination="$2"
+  installation_is_sso_owned "$source" || return 1
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+
+  mv -T -- "$source" "$destination" || return 1
+  [[ ! -e "$source" && ! -L "$source" ]] || return 1
+  installation_is_sso_owned "$destination"
+}
+
+remove_owned_install_dir() {
+  local path="$1"
+  installation_is_sso_owned "$path" || return 1
+  rm -rf -- "$path" || return 1
+  [[ ! -e "$path" && ! -L "$path" ]]
+}
+
 rollback_install_activation() {
   local had_current="$1"
   local backup="$2"
 
-  if ! rm -rf -- "$INSTALL_DIR" || [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
-    err "Automatic installation rollback could not remove the failed active installation."
-    return 1
+  if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    if ! remove_owned_install_dir "$INSTALL_DIR"; then
+      err "Automatic installation rollback refused or could not remove the failed active installation."
+      return 1
+    fi
   fi
 
   if [[ "$had_current" == "1" ]]; then
-    [[ -d "$backup" && ! -L "$backup" ]] || {
-      err "Automatic installation rollback cannot find a trustworthy previous installation at: $backup"
+    installation_is_sso_owned "$backup" || {
+      err "Automatic installation rollback cannot prove ownership of the previous installation at: $backup"
       return 1
     }
-    if ! mv -- "$backup" "$INSTALL_DIR"; then
+    if ! move_owned_install_dir "$backup" "$INSTALL_DIR"; then
       err "Automatic installation rollback failed. Previous install remains at: $backup"
       return 1
     fi
-    if [[ ! -d "$INSTALL_DIR" || -L "$INSTALL_DIR" || -e "$backup" || -L "$backup" ]]; then
+    if ! installation_is_sso_owned "$INSTALL_DIR" || [[ -e "$backup" || -L "$backup" ]]; then
       err "Automatic installation rollback could not verify the restored previous installation."
       return 1
     fi
   fi
 }
-
 install_staged_payload() {
   local stage="$1"
   validate_runtime_paths || return 1
@@ -425,12 +906,14 @@ install_staged_payload() {
   local parent new backup had_current=0
   parent="$(dirname "$INSTALL_DIR")"
   backup="${INSTALL_DIR}.bak"
-  [[ -d "$INSTALL_DIR" ]] && had_current=1
+  [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] && had_current=1
 
   mkdir -p "$parent" "$STATE_DIR" || {
     err "Could not prepare installation/state directories."
     return 1
   }
+  validate_regular_publish_destination "$STATE_DIR/install_dir" "installation-state" || return 1
+
   new="$(mktemp -d "${INSTALL_DIR}.new.XXXXXX")" || {
     err "Could not create a staging directory beside $INSTALL_DIR"
     return 1
@@ -439,34 +922,43 @@ install_staged_payload() {
   local f
   for f in "${PAYLOAD_FILES[@]}"; do
     if ! mkdir -p "$new/$(dirname "$f")" || ! cp -a "$stage/$f" "$new/$f"; then
-      rm -rf "$new"
+      rm -rf -- "$new"
       err "Could not stage payload file: $f"
       return 1
     fi
   done
 
-  if ! chmod +x "$new/install.sh" "$new/sso.sh" || ! validate_payload "$new"; then
-    rm -rf "$new"
-    err "Staged installation failed validation."
+  if ! chmod +x "$new/install.sh" "$new/sso.sh" \
+    || ! validate_payload "$new" \
+    || ! write_managed_install_marker "$new" \
+    || ! installation_is_sso_owned "$new"; then
+    rm -rf -- "$new"
+    err "Staged installation failed validation or managed-ownership marking."
     return 1
   fi
 
   if [[ "$had_current" == "1" ]]; then
-    if ! rm -rf -- "$backup" || [[ -e "$backup" || -L "$backup" ]]; then
-      rm -rf -- "$new" 2>/dev/null || true
-      err "Could not rotate the previous installation backup."
-      return 1
+    if [[ -e "$backup" || -L "$backup" ]]; then
+      if ! remove_owned_install_dir "$backup"; then
+        rm -rf -- "$new" 2>/dev/null || true
+        err "Could not safely rotate the previous installation backup."
+        return 1
+      fi
     fi
-    if ! mv -- "$INSTALL_DIR" "$backup"; then
+    if ! move_owned_install_dir "$INSTALL_DIR" "$backup"; then
       rm -rf -- "$new" 2>/dev/null || true
       err "Could not preserve the current installation."
       return 1
     fi
   fi
 
-  if ! mv -- "$new" "$INSTALL_DIR"; then
+  if ! move_owned_install_dir "$new" "$INSTALL_DIR"; then
     err "Could not activate the staged installation."
-    rm -rf "$new" 2>/dev/null || true
+    if [[ -e "$new" || -L "$new" ]]; then
+      if installation_is_sso_owned "$new"; then
+        rm -rf -- "$new" 2>/dev/null || true
+      fi
+    fi
     if [[ "$had_current" == "1" ]]; then
       if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
         if ! rollback_install_activation "$had_current" "$backup"; then
@@ -479,17 +971,8 @@ install_staged_payload() {
     return 1
   fi
 
-  local state_tmp
-  if ! state_tmp="$(mktemp "$STATE_DIR/.install_dir.XXXXXX")"; then
-    err "Could not create installation-state staging file; restoring the previous installation."
-    if ! rollback_install_activation "$had_current" "$backup"; then
-      err "Automatic rollback failed; inspect the preserved recovery state before retrying."
-    fi
-    return 1
-  fi
-  if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp" || ! mv -f "$state_tmp" "$STATE_DIR/install_dir"; then
-    rm -f "$state_tmp"
-    err "Could not persist the installation path; restoring the previous installation."
+  if ! publish_install_dir_state; then
+    err "Could not persist and verify the installation path; restoring the previous installation."
     if ! rollback_install_activation "$had_current" "$backup"; then
       err "Automatic rollback failed; inspect the preserved recovery state before retrying."
     fi
@@ -501,7 +984,6 @@ install_staged_payload() {
     info "Previous installation preserved at: $backup"
   fi
 }
-
 install_local() {
   local tmp rc
   tmp="$(mktemp -d)" || {
@@ -551,39 +1033,104 @@ download_online() {
 
 create_launcher() {
   validate_runtime_paths || return 1
-  [[ -f "$INSTALL_DIR/sso.sh" ]] || return 1
+  [[ -f "$INSTALL_DIR/sso.sh" && ! -L "$INSTALL_DIR/sso.sh" ]] || return 1
 
-  local launcher_dir launcher_tmp state_file_quoted fallback_install_quoted
+  local launcher_dir launcher_tmp="" previous_tmp="" published_identity=""
   launcher_dir="$(dirname "$LAUNCHER_PATH")"
   mkdir -p "$launcher_dir" || return 1
-  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || return 1
 
-  printf -v state_file_quoted '%q' "$STATE_DIR/install_dir"
-  printf -v fallback_install_quoted '%q' "$INSTALL_DIR"
+  if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+    launcher_is_sso_owned "$LAUNCHER_PATH" || return 1
+    previous_tmp="$(mktemp "${LAUNCHER_PATH}.previous.XXXXXX")" || return 1
+    if ! cp -p -- "$LAUNCHER_PATH" "$previous_tmp" || ! cmp -s -- "$LAUNCHER_PATH" "$previous_tmp"; then
+      rm -f -- "$previous_tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
 
-  if ! cat > "$launcher_tmp" <<LAUNCHER_SCRIPT
-#!/usr/bin/env bash
-# Managed by Simple Server Optimizer.
-set -Eeuo pipefail
-INSTALL_DIR_FILE=$state_file_quoted
-FALLBACK_INSTALL_DIR=$fallback_install_quoted
-if [[ -r "\$INSTALL_DIR_FILE" ]]; then
-  INSTALL_DIR="\$(cat "\$INSTALL_DIR_FILE")"
-else
-  INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
-fi
-[[ -n "\$INSTALL_DIR" ]] || INSTALL_DIR="\$FALLBACK_INSTALL_DIR"
-exec bash "\${INSTALL_DIR}/sso.sh" "\$@"
-LAUNCHER_SCRIPT
-  then
-    rm -f "$launcher_tmp"
+  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || {
+    rm -f -- "$previous_tmp" 2>/dev/null || true
+    return 1
+  }
+
+  if ! render_current_launcher > "$launcher_tmp" || ! chmod 0755 "$launcher_tmp"; then
+    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  fi
+  published_identity="$(stat -c '%d:%i' "$launcher_tmp" 2>/dev/null)" || {
+    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
+    return 1
+  }
+
+  if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+    launcher_is_sso_owned "$LAUNCHER_PATH" || {
+      rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
+      return 1
+    }
+  fi
+
+  if ! mv -fT -- "$launcher_tmp" "$LAUNCHER_PATH"; then
+    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
     return 1
   fi
 
-  if ! chmod 0755 "$launcher_tmp" || ! mv -f "$launcher_tmp" "$LAUNCHER_PATH"; then
-    rm -f "$launcher_tmp"
+  if [[ -e "$launcher_tmp" || -L "$launcher_tmp" ]]; then
+    rm -f -- "$launcher_tmp" 2>/dev/null || true
+    if [[ -n "$previous_tmp" ]]; then
+      if [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" ]] \
+        && cmp -s -- "$LAUNCHER_PATH" "$previous_tmp"; then
+        rm -f -- "$previous_tmp"
+      else
+        err "Launcher publication reported success without consuming its staging file; previous launcher is preserved at: $previous_tmp"
+      fi
+    elif [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+      return 1
+    fi
     return 1
   fi
+
+  if ! launcher_is_current_sso_owned "$LAUNCHER_PATH" \
+    || [[ "$(stat -c %a "$LAUNCHER_PATH" 2>/dev/null)" != "755" ]]; then
+    local current_identity=""
+    if [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" ]]; then
+      current_identity="$(stat -c '%d:%i' "$LAUNCHER_PATH" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$previous_tmp" ]]; then
+      if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+        [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" && "$current_identity" == "$published_identity" ]] || {
+          err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
+          return 1
+        }
+      fi
+
+      local restore_tmp
+      restore_tmp="$(mktemp "${LAUNCHER_PATH}.restore.XXXXXX")" || {
+        err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
+        return 1
+      }
+      if ! cp -p -- "$previous_tmp" "$restore_tmp" \
+        || ! mv -fT -- "$restore_tmp" "$LAUNCHER_PATH" \
+        || [[ -e "$restore_tmp" || -L "$restore_tmp" ]] \
+        || [[ ! -f "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]] \
+        || ! cmp -s -- "$LAUNCHER_PATH" "$previous_tmp" \
+        || ! launcher_is_sso_owned "$LAUNCHER_PATH"; then
+        rm -f -- "$restore_tmp" 2>/dev/null || true
+        err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
+        return 1
+      fi
+      rm -f -- "$previous_tmp"
+      previous_tmp=""
+    else
+      if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
+        [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" && "$current_identity" == "$published_identity" ]] || return 1
+        rm -f -- "$LAUNCHER_PATH" || return 1
+      fi
+    fi
+    return 1
+  fi
+
+  rm -f -- "$previous_tmp" 2>/dev/null || true
 }
 
 run_sso() {
