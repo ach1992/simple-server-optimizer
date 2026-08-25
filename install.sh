@@ -129,7 +129,7 @@ has_payload() {
   local root="$1"
   local f
   for f in "${PAYLOAD_FILES[@]}"; do
-    [[ -s "$root/$f" ]] || return 1
+    [[ -f "$root/$f" && ! -L "$root/$f" && -s "$root/$f" ]] || return 1
   done
 }
 
@@ -165,7 +165,10 @@ curl_fetch() {
   local url="$1"
   local out="$2"
   # Keep options compatible with Debian 10's curl 7.64.x.
-  curl -fL --retry 5 --retry-delay 1 -sS "$url" -o "$out"
+  if ! curl -fL --retry 5 --retry-delay 1 -sS "$url" -o "$out"; then
+    rm -f -- "$out"
+    return 1
+  fi
   [[ -s "$out" ]] || {
     err "Downloaded file is empty: $url"
     return 1
@@ -243,8 +246,8 @@ resolve_tag_commit_sha() {
 verify_release_manifest() {
   local root="$1"
   local manifest="$root/release/SHA256SUMS"
-  [[ -s "$manifest" ]] || {
-    err "Release checksum manifest is missing."
+  [[ -f "$manifest" && ! -L "$manifest" && -s "$manifest" ]] || {
+    err "Release checksum manifest is missing or not a regular file."
     return 1
   }
 
@@ -328,12 +331,24 @@ rollback_install_activation() {
   local had_current="$1"
   local backup="$2"
 
-  rm -rf "$INSTALL_DIR"
-  if [[ "$had_current" == "1" && -d "$backup" ]]; then
-    mv "$backup" "$INSTALL_DIR" || {
-      err "Automatic installation rollback failed. Previous install remains at: $backup"
+  if ! rm -rf -- "$INSTALL_DIR" || [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+    err "Automatic installation rollback could not remove the failed active installation."
+    return 1
+  fi
+
+  if [[ "$had_current" == "1" ]]; then
+    [[ -d "$backup" && ! -L "$backup" ]] || {
+      err "Automatic installation rollback cannot find a trustworthy previous installation at: $backup"
       return 1
     }
+    if ! mv -- "$backup" "$INSTALL_DIR"; then
+      err "Automatic installation rollback failed. Previous install remains at: $backup"
+      return 1
+    fi
+    if [[ ! -d "$INSTALL_DIR" || -L "$INSTALL_DIR" || -e "$backup" || -L "$backup" ]]; then
+      err "Automatic installation rollback could not verify the restored previous installation."
+      return 1
+    fi
   fi
 }
 
@@ -371,23 +386,29 @@ install_staged_payload() {
 
   if [[ -d "$INSTALL_DIR" ]]; then
     had_current=1
-    if ! rm -rf "$backup"; then
-      rm -rf "$new"
+    if ! rm -rf -- "$backup" || [[ -e "$backup" || -L "$backup" ]]; then
+      rm -rf -- "$new" 2>/dev/null || true
       err "Could not rotate the previous installation backup."
       return 1
     fi
-    if ! mv "$INSTALL_DIR" "$backup"; then
-      rm -rf "$new"
+    if ! mv -- "$INSTALL_DIR" "$backup"; then
+      rm -rf -- "$new" 2>/dev/null || true
       err "Could not preserve the current installation."
       return 1
     fi
   fi
 
-  if ! mv "$new" "$INSTALL_DIR"; then
+  if ! mv -- "$new" "$INSTALL_DIR"; then
     err "Could not activate the staged installation."
-    rm -rf "$new"
-    if [[ "$had_current" == "1" && -d "$backup" && ! -e "$INSTALL_DIR" ]]; then
-      mv "$backup" "$INSTALL_DIR" || true
+    rm -rf "$new" 2>/dev/null || true
+    if [[ "$had_current" == "1" ]]; then
+      if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+        if ! rollback_install_activation "$had_current" "$backup"; then
+          err "Automatic rollback failed; the previous installation remains at: $backup"
+        fi
+      else
+        err "Activation left an unexpected install path; previous installation remains at: $backup"
+      fi
     fi
     return 1
   fi
@@ -395,13 +416,17 @@ install_staged_payload() {
   local state_tmp
   if ! state_tmp="$(mktemp "$STATE_DIR/.install_dir.XXXXXX")"; then
     err "Could not create installation-state staging file; restoring the previous installation."
-    rollback_install_activation "$had_current" "$backup" || true
+    if ! rollback_install_activation "$had_current" "$backup"; then
+      err "Automatic rollback failed; inspect the preserved recovery state before retrying."
+    fi
     return 1
   fi
   if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp" || ! mv -f "$state_tmp" "$STATE_DIR/install_dir"; then
     rm -f "$state_tmp"
     err "Could not persist the installation path; restoring the previous installation."
-    rollback_install_activation "$had_current" "$backup" || true
+    if ! rollback_install_activation "$had_current" "$backup"; then
+      err "Automatic rollback failed; inspect the preserved recovery state before retrying."
+    fi
     return 1
   fi
 
@@ -504,7 +529,10 @@ finish_install() {
     return 1
   }
   if [[ "$RUN_AFTER_INSTALL" == "1" ]]; then
-    run_sso
+    run_sso || {
+      err "SSO was installed, but starting the menu failed."
+      return 1
+    }
   fi
   ok "SSO installation/update completed."
 }

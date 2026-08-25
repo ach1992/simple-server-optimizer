@@ -111,6 +111,158 @@ test_finish_install_only_runs_after_success() {
   return "$rc"
 }
 
+test_payload_and_manifest_reject_symlinks() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  (
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$tmp/install"
+    export SSO_STATE_DIR="$tmp/state"
+    export SSO_LAUNCHER_PATH="$tmp/bin/sso"
+    source "$ROOT_DIR/install.sh"
+
+    local payload="$tmp/payload" f
+    for f in "${PAYLOAD_FILES[@]}"; do
+      mkdir -p "$payload/$(dirname "$f")"
+      printf 'payload\n' > "$payload/$f"
+    done
+    printf 'external\n' > "$tmp/external"
+    rm -f "$payload/install.sh"
+    ln -s "$tmp/external" "$payload/install.sh"
+    if has_payload "$payload"; then exit 1; fi
+
+    mkdir -p "$payload/release"
+    printf '%064d  install.sh\n' 0 > "$tmp/manifest"
+    ln -s "$tmp/manifest" "$payload/release/SHA256SUMS"
+    if verify_release_manifest "$payload" >/dev/null 2>&1; then exit 1; fi
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_failed_curl_cannot_succeed_with_partial_output() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  (
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$tmp/install"
+    export SSO_STATE_DIR="$tmp/state"
+    export SSO_LAUNCHER_PATH="$tmp/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    err() { :; }
+    curl() {
+      printf 'partial-but-nonempty\n' > "$tmp/out"
+      return 22
+    }
+    if curl_fetch 'https://example.invalid/payload' "$tmp/out"; then exit 1; fi
+    [[ ! -e "$tmp/out" ]]
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_activation_failure_restores_previous_installation() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p "$tmp/install"
+  printf 'previous\n' > "$tmp/install/PREVIOUS"
+  (
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$tmp/install"
+    export SSO_STATE_DIR="$tmp/state"
+    export SSO_LAUNCHER_PATH="$tmp/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    err() { :; }
+    info() { :; }
+    ok() { :; }
+    mv() {
+      local src dst
+      if [[ "${1:-}" == "--" ]]; then
+        src="${2:-}"
+        dst="${3:-}"
+      else
+        src="${1:-}"
+        dst="${2:-}"
+      fi
+      if [[ "$src" == "$INSTALL_DIR".new.* && "$dst" == "$INSTALL_DIR" && ! -e "$tmp/ACTIVATION_FAILED" ]]; then
+        : > "$tmp/ACTIVATION_FAILED"
+        return 73
+      fi
+      command mv "$@"
+    }
+
+    if install_staged_payload "$ROOT_DIR"; then exit 1; fi
+    [[ -f "$tmp/ACTIVATION_FAILED" ]]
+    [[ -f "$INSTALL_DIR/PREVIOUS" ]]
+    [[ ! -e "$INSTALL_DIR.bak" ]]
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_rollback_removal_failure_preserves_previous_backup() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p "$tmp/install" "$tmp/install.bak"
+  printf 'failed-new\n' > "$tmp/install/NEW"
+  printf 'previous\n' > "$tmp/install.bak/PREVIOUS"
+  (
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$tmp/install"
+    export SSO_STATE_DIR="$tmp/state"
+    export SSO_LAUNCHER_PATH="$tmp/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    err() { :; }
+    rm() {
+      local arg
+      for arg in "$@"; do
+        if [[ "$arg" == "$INSTALL_DIR" ]]; then return 74; fi
+      done
+      command rm "$@"
+    }
+
+    if rollback_install_activation 1 "$INSTALL_DIR.bak"; then exit 1; fi
+    [[ -f "$INSTALL_DIR/NEW" ]]
+    [[ -f "$INSTALL_DIR.bak/PREVIOUS" ]]
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_finish_install_propagates_run_failure() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  (
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    export SSO_INSTALL_DIR="$tmp/install"
+    export SSO_STATE_DIR="$tmp/state"
+    export SSO_LAUNCHER_PATH="$tmp/bin/sso"
+    source "$ROOT_DIR/install.sh"
+    RUN_AFTER_INSTALL=1
+    create_launcher() { return 0; }
+    run_sso() { return 75; }
+    err() { :; }
+    if finish_install >/dev/null 2>&1; then exit 1; fi
+  )
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "runtime paths are canonical and durable state/launcher stay outside replaceable trees" test_runtime_paths_are_canonical_and_persistence_is_independent
 run_test "finish_install runs only after successful install/download" test_finish_install_only_runs_after_success
+run_test "runtime payload and checksum manifest reject symlink metadata" test_payload_and_manifest_reject_symlinks
+run_test "curl failure cannot be hidden by a partial nonempty output" test_failed_curl_cannot_succeed_with_partial_output
+run_test "activation failure restores the previous installation" test_activation_failure_restores_previous_installation
+run_test "rollback removal failure preserves the previous backup evidence" test_rollback_removal_failure_preserves_previous_backup
+run_test "finish_install propagates a failed SSO launch" test_finish_install_propagates_run_failure
 finish_tests
