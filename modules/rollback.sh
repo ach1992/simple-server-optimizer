@@ -353,12 +353,17 @@ backup_capture_services() {
 backup_mark() {
   local d="$1"
   local tag="$2"
+  local verify_tag="" verify_format=""
 
+  # Keep the durable quarantine marker in place while all certification data
+  # is written and re-read. Certification becomes visible with one same-dir
+  # atomic rename, and there is no fallible verification after that transition.
   printf '%s\n' "$tag" > "$d/TAG" || return 1
   printf '%s\n' "$SSO_BACKUP_FORMAT" > "$d/FORMAT" || return 1
-  rm -f -- "$d/INCOMPLETE" || return 1
-  backup_path_exists "$d/INCOMPLETE" && return 1
-  backup_is_usable_dir "$d"
+  verify_tag="$(cat "$d/TAG" 2>/dev/null)" || return 1
+  verify_format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
+  [[ "$verify_tag" == "$tag" && "$verify_format" == "$SSO_BACKUP_FORMAT" ]] || return 1
+  mv -- "$d/INCOMPLETE" "$d/COMPLETE" || return 1
 }
 
 backup_create() {
@@ -374,11 +379,10 @@ backup_create() {
     || ! backup_capture_fail2ban "$d" \
     || ! backup_capture_services "$d" \
     || ! backup_mark "$d" "$tag"; then
-    if ! rm -rf -- "$d" 2>/dev/null || backup_path_exists "$d"; then
-      printf 'Backup capture failed; incomplete snapshot remains quarantined at %s and will be ignored.\n' "$d" >&2
-    else
-      printf 'Backup capture failed; incomplete snapshot was discarded.\n' >&2
-    fi
+    # Do not attempt recursive cleanup here. A partial cleanup could remove the
+    # quarantine marker before failing and make leftover FORMAT/TAG evidence look
+    # certified. Keeping the failed directory intact is the fail-closed policy.
+    printf 'Backup capture failed; incomplete snapshot remains quarantined at %s and will be ignored.\n' "$d" >&2
     return 1
   fi
 
@@ -499,15 +503,39 @@ backup_previous_install_source() {
 backup_snapshot_is_preownership() {
   local resource="$1"
   local source="$2"
+  local evidence_mode="${3:-historical}"
+  local shared="" shared_value=""
 
   backup_is_usable_dir "$source" || return 1
   case "$resource" in
     bbr)
-      # fq/BBR always creates these namespaced files before it owns the shared
-      # modules-load path. Their presence proves this is already post-ownership.
+      # Presence of SSO namespaced files proves the snapshot is already after
+      # an fq/BBR ownership-taking operation.
       backup_path_exists "$source/sysctl/99-sso-qdisc.conf" && return 1
       backup_path_exists "$source/sysctl/99-sso-bbr.conf" && return 1
-      return 0
+      shared="$source/sysctl/bbr.conf"
+
+      case "$evidence_mode" in
+        current)
+          # The current snapshot was captured immediately before the mutation.
+          # Explicit presence OR absence is valid only when no earlier matching
+          # ownership history exists (enforced by backup_record_ownership_baseline).
+          if backup_path_exists "$shared" || [[ -f "${shared}.absent" ]]; then
+            return 0
+          fi
+          return 1
+          ;;
+        historical)
+          # Legacy history needs positive non-SSO evidence. SSO writes exactly
+          # "tcp_bbr" to this shared path; absence of namespaced files alone is
+          # not chronology proof because those files may have been removed.
+          backup_path_exists "$shared" || return 1
+          shared_value="$(cat "$shared" 2>/dev/null)" || return 1
+          [[ "$shared_value" != "tcp_bbr" ]] || return 1
+          return 0
+          ;;
+        *) return 1 ;;
+      esac
       ;;
     fail2ban)
       if [[ -f "$source/fail2ban/sso.local" ]] \
@@ -534,7 +562,8 @@ backup_snapshot_is_preownership() {
 backup_record_ownership_baseline() {
   local tag="$1"
   local current="$2"
-  local resource="" pattern="" source="" final=""
+  local resource="" pattern="" source="" prior_active="" final=""
+  local ambiguous_history=0
 
   case "$tag" in
     network:fq_bbr) resource="bbr"; pattern="network:fq_bbr" ;;
@@ -549,19 +578,29 @@ backup_record_ownership_baseline() {
     return 1
   fi
 
-  # Compatibility recovery is deliberately conservative: only the previous
-  # install tree can provide older chronology, and the candidate must still
-  # prove it predates SSO ownership of the resource. We never treat the
-  # earliest retained active backup as equivalent to the original baseline.
+  # Compatibility recovery is deliberately conservative. A previous-install
+  # snapshot is accepted only when it positively proves pre-ownership state.
+  # If retained history exists but cannot prove that, current-state fallback is
+  # forbidden: ambiguity must remain ambiguity rather than becoming a baseline.
   source="$(backup_previous_install_source "$pattern" 2>/dev/null || true)"
-  if [[ -n "$source" ]] && backup_snapshot_is_preownership "$resource" "$source"; then
-    backup_persist_resource_baseline "$resource" "$source"
-    return $?
+  if [[ -n "$source" ]]; then
+    if backup_snapshot_is_preownership "$resource" "$source" historical; then
+      backup_persist_resource_baseline "$resource" "$source"
+      return $?
+    fi
+    ambiguous_history=1
   fi
+
+  # Active retained history is never promoted to the original baseline. Its
+  # mere existence means the current snapshot cannot be proven to be the first
+  # ownership-taking operation when no durable baseline already exists.
+  prior_active="$(backup_first_tag_in_root "$BACKUP_DIR_BASE" "$pattern" "$current" 2>/dev/null || true)"
+  [[ -z "$prior_active" ]] || ambiguous_history=1
 
   # On a genuinely first ownership-taking operation, the just-completed
   # snapshot is directly pre-mutation and can become the durable baseline.
-  if backup_snapshot_is_preownership "$resource" "$current"; then
+  if [[ "$ambiguous_history" == "0" ]] \
+    && backup_snapshot_is_preownership "$resource" "$current" current; then
     backup_persist_resource_baseline "$resource" "$current"
     return $?
   fi
@@ -576,8 +615,8 @@ backup_record_ownership_baseline() {
 backup_migrate_ownership_baselines() {
   [[ -n "${STATE_DIR:-}" && -n "${BACKUP_DIR_BASE:-}" && -n "${SSO_DIR:-}" ]] || return 0
 
-  # Only BBR has enough legacy namespaced evidence to prove that a retained
-  # previous-install snapshot predates ownership of the shared bbr.conf path.
+  # Only BBR has enough legacy evidence to recover a durable baseline, and the
+  # historical predicate requires positive non-SSO shared-file evidence.
   local final source
   final="$(backup_baseline_path bbr)"
   backup_is_usable_dir "$final" && return 0
@@ -587,7 +626,7 @@ backup_migrate_ownership_baselines() {
 
   source="$(backup_previous_install_source 'network:fq_bbr' 2>/dev/null || true)"
   [[ -n "$source" ]] || return 0
-  backup_snapshot_is_preownership bbr "$source" || return 0
+  backup_snapshot_is_preownership bbr "$source" historical || return 0
   backup_persist_resource_baseline bbr "$source"
 }
 
