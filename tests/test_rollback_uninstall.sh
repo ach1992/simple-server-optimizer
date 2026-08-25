@@ -174,8 +174,32 @@ service_restore_preserves_disabled_inactive_state() {
     set -Eeuo pipefail
     source "$ROOT_DIR/modules/utils.sh"
     source "$ROOT_DIR/modules/rollback.sh"
-    systemctl() { printf '%s\n' "$*" >> "$tmp/commands.log"; return 0; }
+    PERSIST=1; RUNTIME=1; PMASK=0; RMASK=0; ACTIVE=1
+    systemctl() {
+      printf '%s\n' "$*" >> "$tmp/commands.log"
+      case "$1" in
+        unmask) if [[ "${2:-}" == "--runtime" ]]; then RMASK=0; else PMASK=0; fi ;;
+        disable) if [[ "${2:-}" == "--runtime" ]]; then RUNTIME=0; else PERSIST=0; fi ;;
+        enable) if [[ "${2:-}" == "--runtime" ]]; then RUNTIME=1; else PERSIST=1; fi ;;
+        mask) if [[ "${2:-}" == "--runtime" ]]; then RMASK=1; else PMASK=1; fi ;;
+        start|restart) ACTIVE=1 ;;
+        stop) ACTIVE=0 ;;
+        reset-failed) : ;;
+        show) printf 'loaded\n' ;;
+        is-enabled)
+          if (( RMASK )); then printf 'masked-runtime\n'
+          elif (( PMASK )); then printf 'masked\n'
+          elif (( RUNTIME )); then printf 'enabled-runtime\n'
+          elif (( PERSIST )); then printf 'enabled\n'
+          else printf 'disabled\n'; fi
+          ;;
+        is-active) if (( ACTIVE )); then printf 'active\n'; else printf 'inactive\n'; fi ;;
+        *) return 99 ;;
+      esac
+      return 0
+    }
     backup_restore_service_state "$tmp/backup" irqbalance.service 0
+    (( PERSIST == 0 && RUNTIME == 0 && PMASK == 0 && RMASK == 0 && ACTIVE == 0 ))
   ) || { rm -rf "$tmp"; return 1; }
   local rc=0
   grep -q '^disable irqbalance.service$' "$tmp/commands.log" || rc=1
@@ -190,25 +214,53 @@ service_runtime_states_restore_and_unknown_does_not_mutate() {
   tmp="$(mktemp -d)" || return 1
   mkdir -p "$tmp/backup/services/test.service"
   printf 'loaded\n' > "$tmp/backup/services/test.service/load"
-  printf 'masked-runtime\n' > "$tmp/backup/services/test.service/enabled"
-  printf 'inactive\n' > "$tmp/backup/services/test.service/active"
   : > "$tmp/commands.log"
   (
     set -Eeuo pipefail
     source "$ROOT_DIR/modules/rollback.sh"
-    systemctl() { printf '%s\n' "$*" >> "$tmp/commands.log"; return 0; }
-    backup_restore_service_state "$tmp/backup" test.service 0
-    grep -q '^mask --runtime test.service$' "$tmp/commands.log"
-
-    : > "$tmp/commands.log"
-    printf 'enabled-runtime\n' > "$tmp/backup/services/test.service/enabled"
-    printf 'active\n' > "$tmp/backup/services/test.service/active"
-    backup_restore_service_state "$tmp/backup" test.service 0
-    grep -q '^enable --runtime test.service$' "$tmp/commands.log"
-    grep -q '^start test.service$' "$tmp/commands.log"
+    restore_case() {
+      local desired="$1" desired_active="$2"
+      printf '%s\n' "$desired" > "$tmp/backup/services/test.service/enabled"
+      printf '%s\n' "$desired_active" > "$tmp/backup/services/test.service/active"
+      PERSIST=1; RUNTIME=1; PMASK=0; RMASK=0; ACTIVE=1
+      : > "$tmp/commands.log"
+      systemctl() {
+        printf '%s\n' "$*" >> "$tmp/commands.log"
+        case "$1" in
+          unmask) if [[ "${2:-}" == "--runtime" ]]; then RMASK=0; else PMASK=0; fi ;;
+          disable) if [[ "${2:-}" == "--runtime" ]]; then RUNTIME=0; else PERSIST=0; fi ;;
+          enable) if [[ "${2:-}" == "--runtime" ]]; then RUNTIME=1; else PERSIST=1; fi ;;
+          mask) if [[ "${2:-}" == "--runtime" ]]; then RMASK=1; else PMASK=1; fi ;;
+          start|restart) ACTIVE=1 ;;
+          stop) ACTIVE=0 ;;
+          reset-failed) : ;;
+          show) printf 'loaded\n' ;;
+          is-enabled)
+            if (( RMASK )); then printf 'masked-runtime\n'
+            elif (( PMASK )); then printf 'masked\n'
+            elif (( RUNTIME )); then printf 'enabled-runtime\n'
+            elif (( PERSIST )); then printf 'enabled\n'
+            else printf 'disabled\n'; fi
+            ;;
+          is-active) if (( ACTIVE )); then printf 'active\n'; else printf 'inactive\n'; fi ;;
+          *) return 99 ;;
+        esac
+        return 0
+      }
+      backup_restore_service_state "$tmp/backup" test.service 0
+      case "$desired" in
+        masked-runtime) (( PERSIST == 0 && RUNTIME == 0 && PMASK == 0 && RMASK == 1 && ACTIVE == 0 )) ;;
+        enabled-runtime) (( PERSIST == 0 && RUNTIME == 1 && PMASK == 0 && RMASK == 0 && ACTIVE == 1 )) ;;
+        *) return 1 ;;
+      esac
+    }
+    restore_case masked-runtime inactive
+    restore_case enabled-runtime active
 
     : > "$tmp/commands.log"
     printf 'unknown\n' > "$tmp/backup/services/test.service/enabled"
+    printf 'active\n' > "$tmp/backup/services/test.service/active"
+    systemctl() { printf '%s\n' "$*" >> "$tmp/commands.log"; return 99; }
     rc=0
     backup_restore_service_state "$tmp/backup" test.service 0 || rc=$?
     [[ "$rc" == "3" ]]
