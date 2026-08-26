@@ -34,21 +34,28 @@ payload_path_is_safe() {
 }
 
 manifest_paths_match_payload() {
-  local manifest="$1" expected actual
+  local manifest="$1" expected actual expected_identity actual_identity rc
   expected="$(mktemp)" || return 1
-  actual="$(mktemp)" || { rm -f -- "$expected"; return 1; }
+  expected_identity="$(path_identity "$expected")" || return 1
+  actual="$(mktemp)" || {
+    remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+    return 1
+  }
+  actual_identity="$(path_identity "$actual")" || return 1
   printf '%s\n' "${PAYLOAD_FILES[@]}" | LC_ALL=C sort > "$expected"
   if ! awk '
     NF != 2 { exit 1 }
     length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 1 }
     { path=$2; sub(/^\*/, "", path); print path }
   ' "$manifest" | LC_ALL=C sort > "$actual"; then
-    rm -f -- "$expected" "$actual"
+    remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$actual" "$actual_identity" >/dev/null 2>&1 || true
     return 1
   fi
   cmp -s -- "$expected" "$actual"
-  local rc=$?
-  rm -f -- "$expected" "$actual"
+  rc=$?
+  remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+  remove_expected_regular_evidence "$actual" "$actual_identity" >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -66,14 +73,9 @@ path_identity() {
 rename_noreplace() {
   local source="$1" destination="$2"
 
-  # The historical hardening suite injects manifest rename failures with a
-  # PATH-scoped mv wrapper. This seam is enabled only by the exported test
-  # harness flag plus its per-case MV_FLAG; production always uses renameat2.
-  if [[ "${SSO_TEST_ONLY:-0}" == "1" && -n "${MV_FLAG:-}" ]]; then
-    mv -fT -- "$source" "$destination"
-    return
-  fi
-
+  # Direct execution has one publication primitive regardless of inherited
+  # environment: Linux renameat2(RENAME_NOREPLACE). Test fault injection wraps
+  # python3 from outside this script instead of changing production semantics.
   command -v python3 >/dev/null 2>&1 || {
     printf 'Python 3 is required for atomic manifest publication.\n' >&2
     return 1
@@ -111,12 +113,16 @@ make_absent_sibling_path() {
 }
 
 remove_expected_regular_evidence() {
-  local path="$1" expected_identity="$2"
+  local path="$1" expected_identity="$2" cleanup=""
   [[ -n "$path" ]] || return 0
   if [[ ! -e "$path" && ! -L "$path" ]]; then return 0; fi
   [[ -f "$path" && ! -L "$path" ]] || return 1
   [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
-  rm -f -- "$path"
+  cleanup="$(make_absent_sibling_path "${path}.cleanup")" || return 1
+  atomic_displace_expected_path "$path" "$cleanup" "$expected_identity" || return 1
+  [[ -f "$cleanup" && ! -L "$cleanup" ]] || return 1
+  [[ "$(path_identity "$cleanup" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -f -- "$cleanup"
 }
 
 atomic_move_noreplace() {
@@ -134,12 +140,12 @@ atomic_move_noreplace() {
 atomic_displace_expected_path() {
   local path="$1" evidence="$2" expected_identity="$3" moved_identity=""
   [[ ! -e "$evidence" && ! -L "$evidence" ]] || return 1
+  [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
   rename_noreplace "$path" "$evidence" || return 1
   moved_identity="$(path_identity "$evidence" 2>/dev/null || true)"
   if [[ -z "$moved_identity" || "$moved_identity" != "$expected_identity" || -e "$path" || -L "$path" ]]; then
-    if [[ -n "$moved_identity" && ! -e "$path" && ! -L "$path" ]]; then
-      rename_noreplace "$evidence" "$path" >/dev/null 2>&1 || true
-    fi
+    # Once evidence identity is uncertain it is not ours to move, unlink,
+    # quarantine, or overwrite. Fail closed and preserve both observed names.
     return 1
   fi
 }

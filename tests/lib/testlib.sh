@@ -5,8 +5,37 @@ TEST_PASS=0
 TEST_FAIL=0
 TEST_XFAIL=0
 
-# Explicitly marks subprocesses launched by this regression harness.
-export SSO_TEST_ONLY=1
+# Compatibility fault injection belongs to the test harness, never production
+# publication primitives. Historical manifest tests set MV_FLAG/MV_MODE while
+# launching the generator; this exported wrapper translates those cases into
+# faults around the generator's real python3/renameat2 call.
+python3() {
+  local source_path="${2:-}" destination="${3:-}" mode="${MV_MODE:-}"
+  if [[ -n "${MV_FLAG:-}" && "$destination" == 'release/SHA256SUMS' \
+    && "$source_path" == release/.SHA256SUMS.* \
+    && "$source_path" != release/.SHA256SUMS.previous.* \
+    && "$source_path" != release/.SHA256SUMS.verify.* ]]; then
+    : > "$MV_FLAG"
+    case "$mode" in
+      false-success) return 0 ;;
+      fail) return 77 ;;
+      corrupt-success)
+        command python3 "$@" || return
+        printf 'corrupt-manifest\n' > "$destination"
+        return 0
+        ;;
+      '')
+        command python3 "$@" || return
+        local replacement="release/.operator-replacement.$$"
+        printf 'operator-manifest\n' > "$replacement"
+        /usr/bin/mv -fT -- "$replacement" "$destination"
+        return 0
+        ;;
+    esac
+  fi
+  command python3 "$@"
+}
+export -f python3
 
 _test_print() {
   printf '%s\n' "$*"

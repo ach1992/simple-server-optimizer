@@ -3,9 +3,18 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 pass=0
+
 run_case() {
-  local name="$1" fn="$2"
-  if ( "$fn" ); then
+  local name="$1" fn="$2" rc had_errexit=0
+  case $- in *e*) had_errexit=1 ;; esac
+  set +e
+  (
+    set -e
+    "$fn"
+  )
+  rc=$?
+  if [[ "$had_errexit" == "1" ]]; then set -e; else set +e; fi
+  if [[ "$rc" -eq 0 ]]; then
     printf 'ok - %s\n' "$name"
     pass=$((pass + 1))
   else
@@ -13,6 +22,7 @@ run_case() {
     return 1
   fi
 }
+
 load_installer() {
   local root="$1"
   export SSO_INSTALL_LIB_ONLY=1
@@ -25,6 +35,24 @@ load_installer() {
   warn(){ :; }
   info(){ :; }
   ok(){ :; }
+}
+
+synthetic_intermediate_failure() {
+  false
+  true
+}
+
+harness_intermediate_failure_is_detected() {
+  local rc had_errexit=0
+  case $- in *e*) had_errexit=1 ;; esac
+  set +e
+  (
+    set -e
+    synthetic_intermediate_failure
+  )
+  rc=$?
+  if [[ "$had_errexit" == "1" ]]; then set -e; else set +e; fi
+  [[ "$rc" -ne 0 ]]
 }
 
 atomic_existing_destination_is_untouched() {
@@ -64,6 +92,53 @@ atomic_post_rename_replacement_is_untouched() {
   }
   if atomic_move_noreplace "$t/source" "$t/destination"; then return 1; fi
   [[ ! -e "$t/source" && "$(cat "$t/destination")" == operator ]]
+}
+
+atomic_displace_post_rename_replacement_is_untouched() {
+  local t expected evidence; t="$(mktemp -d)"
+  load_installer "$t"
+  printf owned > "$t/path"
+  expected="$(path_identity "$t/path")"
+  evidence="$t/evidence"
+  eval "$(declare -f rename_noreplace | sed '1s/rename_noreplace/real_rename_noreplace/')"
+  rename_noreplace() {
+    local source="$1" destination="$2" replacement
+    real_rename_noreplace "$source" "$destination" || return
+    if [[ "$source" == "$t/path" && "$destination" == "$evidence" ]]; then
+      replacement="${destination}.operator.$$"
+      printf operator > "$replacement"
+      command mv -fT -- "$replacement" "$destination"
+    fi
+  }
+  if atomic_displace_expected_path "$t/path" "$evidence" "$expected"; then return 1; fi
+  [[ ! -e "$t/path" && "$(cat "$evidence")" == operator ]]
+}
+
+staging_replacement_before_failure_cleanup_is_untouched() {
+  local t operator_path; t="$(mktemp -d)"
+  load_installer "$t"
+  mkdir -p "$STATE_DIR"
+  cp() {
+    local destination="${@: -1}" newroot
+    if [[ "$destination" == "$INSTALL_DIR.new."*/install.sh ]]; then
+      newroot="${destination%/install.sh}"
+      command mv -- "$newroot" "${newroot}.owned-original"
+      mkdir "$newroot"
+      printf operator > "$newroot/OPERATOR"
+      printf '%s\n' "$newroot" > "$t/operator-path"
+      return 82
+    fi
+    command cp "$@"
+  }
+  if install_staged_payload "$ROOT_DIR" >/dev/null 2>&1; then return 1; fi
+  operator_path="$(cat "$t/operator-path")"
+  [[ -d "$operator_path" && "$(cat "$operator_path/OPERATOR")" == operator ]]
+}
+
+direct_installer_ignores_inherited_test_mode() {
+  local output
+  output="$(SSO_INSTALL_LIB_ONLY=1 SSO_INSTALL_DIR=/tmp/hostile-install SSO_STATE_DIR=/tmp/hostile-state SSO_LAUNCHER_PATH=/tmp/hostile-sso bash "$ROOT_DIR/install.sh" --help)"
+  grep -q '^Usage: install.sh' <<<"$output"
 }
 
 state_publication_real_race_preserves_both_sides() {
@@ -164,6 +239,48 @@ MOCK
   [[ "$(cat "$t/repo/release/SHA256SUMS")" == operator-race ]]
 }
 
+manifest_displace_post_rename_replacement_is_untouched() {
+  local t real_python displaced; t="$(mktemp -d)"; real_python="$(command -v python3)"
+  make_manifest_fixture "$t/repo"
+  "$t/repo/scripts/generate_release_manifest.sh" >/dev/null
+  printf 'changed\n' >> "$t/repo/install.sh"
+  mkdir "$t/bin"
+  cat > "$t/bin/python3" <<MOCK
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source_path="\${2:-}"; destination="\${3:-}"
+if [[ "\$source_path" == 'release/SHA256SUMS' && "\$destination" == release/.SHA256SUMS.displaced.* ]]; then
+  "$real_python" "\$@"
+  replacement="release/.operator-evidence.\$\$"
+  printf 'operator-evidence\n' > "\$replacement"
+  /usr/bin/mv -fT -- "\$replacement" "\$destination"
+  exit 0
+fi
+exec "$real_python" "\$@"
+MOCK
+  chmod +x "$t/bin/python3"
+  if (cd "$t/repo" && PATH="$t/bin:$PATH" scripts/generate_release_manifest.sh >/dev/null 2>&1); then return 1; fi
+  [[ ! -e "$t/repo/release/SHA256SUMS" ]]
+  displaced="$(find "$t/repo/release" -maxdepth 1 -type f -name '.SHA256SUMS.displaced.*' -print -quit)"
+  [[ -n "$displaced" && "$(cat "$displaced")" == operator-evidence ]]
+}
+
+direct_manifest_ignores_inherited_test_variables() {
+  local t; t="$(mktemp -d)"
+  make_manifest_fixture "$t/repo"
+  mkdir "$t/bin"
+  cat > "$t/bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+: > "$MV_FLAG"
+exec /usr/bin/mv "$@"
+MOCK
+  chmod +x "$t/bin/mv"
+  (cd "$t/repo" && SSO_TEST_ONLY=1 MV_FLAG="$t/MV_CALLED" PATH="$t/bin:$PATH" scripts/generate_release_manifest.sh >/dev/null)
+  [[ ! -e "$t/MV_CALLED" ]]
+  [[ -s "$t/repo/release/SHA256SUMS" ]]
+}
+
 manifest_corrupt_recovery_preserves_original_previous_copy() {
   local t before output rc previous real_python
   t="$(mktemp -d)"; real_python="$(command -v python3)"
@@ -188,13 +305,19 @@ MOCK
   [[ -n "$previous" && "$(cat "$previous")" == "$before" ]]
 }
 
+run_case 'harness intermediate failure is detected' harness_intermediate_failure_is_detected
 run_case 'atomic existing destination is untouched' atomic_existing_destination_is_untouched
 run_case 'atomic real race is untouched' atomic_real_race_is_untouched
 run_case 'atomic post-rename replacement is untouched' atomic_post_rename_replacement_is_untouched
+run_case 'atomic displace post-rename replacement is untouched' atomic_displace_post_rename_replacement_is_untouched
+run_case 'staging replacement before failure cleanup is untouched' staging_replacement_before_failure_cleanup_is_untouched
+run_case 'direct installer ignores inherited test mode' direct_installer_ignores_inherited_test_mode
 run_case 'state publication real race preserves both sides' state_publication_real_race_preserves_both_sides
 run_case 'launcher publication real race preserves operator file' launcher_publication_real_race_preserves_operator_file
 run_case 'backup rotation real race preserves operator destination' backup_rotation_real_race_preserves_operator_destination
 run_case 'manifest corrupt previous-copy success is rejected' manifest_previous_copy_corrupt_success_is_rejected
 run_case 'manifest real race preserves operator destination' manifest_real_race_preserves_operator_destination
+run_case 'manifest displace post-rename replacement is untouched' manifest_displace_post_rename_replacement_is_untouched
+run_case 'direct manifest ignores inherited test variables' direct_manifest_ignores_inherited_test_variables
 run_case 'manifest corrupt recovery preserves original previous copy' manifest_corrupt_recovery_preserves_original_previous_copy
-printf 'atomic publication regressions: %d/9 PASS\n' "$pass"
+printf 'atomic publication regressions: %d/15 PASS\n' "$pass"

@@ -7,10 +7,16 @@ STATE_DIR="/etc/sso"
 LAUNCHER_PATH="/usr/local/bin/sso"
 RUN_AFTER_INSTALL=1
 
-# Runtime path overrides are test-only hooks. The root-executed production
-# installer always uses the project-owned paths above so inherited environment
-# variables cannot redirect destructive writes or the trusted release source.
-if [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]]; then
+# Test overrides are honored only when this file is actually sourced as a
+# library. Direct execution always uses production paths and production control
+# flow, even if test-named environment variables were inherited.
+SSO_INSTALL_IS_SOURCED=0
+if [[ "${BASH_SOURCE[0]:-}" != "${0:-}" ]]; then
+  SSO_INSTALL_IS_SOURCED=1
+fi
+SSO_INSTALL_TEST_CONTEXT=0
+if [[ "$SSO_INSTALL_IS_SOURCED" == "1" && "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]]; then
+  SSO_INSTALL_TEST_CONTEXT=1
   INSTALL_DIR="${SSO_INSTALL_DIR:-$INSTALL_DIR}"
   STATE_DIR="${SSO_STATE_DIR:-$STATE_DIR}"
   LAUNCHER_PATH="${SSO_LAUNCHER_PATH:-$LAUNCHER_PATH}"
@@ -345,7 +351,9 @@ write_managed_install_marker() {
   [[ ! -e "$marker" && ! -L "$marker" ]] || return 1
 
   if ! managed_install_marker_expected > "$marker" || ! chmod 0644 "$marker"; then
-    rm -f -- "$marker" 2>/dev/null || true
+    # Do not unlink by pathname after a failed write/chmod: a concurrent actor
+    # may have replaced the marker. The enclosing staging tree cleanup is
+    # identity-bound, so leaving this artifact is safer than guessing ownership.
     return 1
   fi
   managed_install_marker_is_valid "$root"
@@ -404,11 +412,20 @@ validate_existing_install_state() {
 curl_fetch() {
   local url="$1"
   local out="$2"
+  local out_identity=""
+  # Downloads are created under installer-owned staging trees. Establish an
+  # inode before curl opens the pathname so failure cleanup can prove exactly
+  # which file it is allowed to remove.
+  [[ ! -e "$out" && ! -L "$out" ]] || return 1
+  : > "$out" || return 1
+  out_identity="$(path_identity "$out")" || return 1
   # Keep options compatible with Debian 10's curl 7.64.x.
   if ! curl -fL --retry 5 --retry-delay 1 -sS "$url" -o "$out"; then
-    rm -f -- "$out"
+    remove_expected_regular_evidence "$out" "$out_identity" >/dev/null 2>&1 || true
     return 1
   fi
+  [[ -f "$out" && ! -L "$out" ]] || return 1
+  [[ "$(path_identity "$out" 2>/dev/null || true)" == "$out_identity" ]] || return 1
   [[ -s "$out" ]] || {
     err "Downloaded file is empty: $url"
     return 1
@@ -713,12 +730,14 @@ verify_release_manifest() {
     }
   done
 
-  local expected actual
+  local expected actual expected_identity actual_identity
   expected="$(mktemp)" || return 1
+  expected_identity="$(path_identity "$expected")" || return 1
   actual="$(mktemp)" || {
-    rm -f "$expected"
+    remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
     return 1
   }
+  actual_identity="$(path_identity "$actual")" || return 1
 
   printf '%s\n' "${PAYLOAD_FILES[@]}" | LC_ALL=C sort > "$expected"
 
@@ -733,17 +752,20 @@ verify_release_manifest() {
       print path
     }
   ' "$manifest" | LC_ALL=C sort > "$actual"; then
-    rm -f "$expected" "$actual"
+    remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$actual" "$actual_identity" >/dev/null 2>&1 || true
     err "Release checksum manifest has an invalid format."
     return 1
   fi
 
   if ! cmp -s "$expected" "$actual"; then
-    rm -f "$expected" "$actual"
+    remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$actual" "$actual_identity" >/dev/null 2>&1 || true
     err "Release checksum manifest does not describe the exact SSO payload."
     return 1
   fi
-  rm -f "$expected" "$actual"
+  remove_expected_regular_evidence "$expected" "$expected_identity" >/dev/null 2>&1 || true
+  remove_expected_regular_evidence "$actual" "$actual_identity" >/dev/null 2>&1 || true
 
   if ! (cd "$root" && sha256sum -c release/SHA256SUMS >/dev/null); then
     err "Release checksum verification failed."
@@ -805,7 +827,7 @@ rename_noreplace() {
   # Existing installer regressions override mv while loading the installer as a
   # library. Preserve those bounded fault-injection seams without weakening the
   # production path or the new real-rename race tests.
-  if [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]] && declare -F mv >/dev/null 2>&1; then
+  if [[ "$SSO_INSTALL_TEST_CONTEXT" == "1" ]] && declare -F mv >/dev/null 2>&1; then
     mv -fT -- "$source" "$destination"
     return
   fi
@@ -882,25 +904,44 @@ restore_displaced_path() {
 atomic_displace_expected_path() {
   local path="$1" evidence="$2" expected_identity="$3" moved_identity=""
   [[ ! -e "$evidence" && ! -L "$evidence" ]] || return 1
+  [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
   rename_noreplace "$path" "$evidence" || return 1
   moved_identity="$(path_identity "$evidence" 2>/dev/null || true)"
   if [[ -z "$moved_identity" || "$moved_identity" != "$expected_identity" || -e "$path" || -L "$path" ]]; then
-    if [[ -n "$moved_identity" && ! -e "$path" && ! -L "$path" ]]; then
-      rename_noreplace "$evidence" "$path" >/dev/null 2>&1 || true
-    fi
+    # Identity is no longer provable. The evidence pathname may now belong to
+    # a concurrent actor, so never move, unlink, quarantine, or overwrite it.
     return 1
   fi
 }
 
 remove_expected_regular_evidence() {
-  local path="$1" expected_identity="$2"
+  local path="$1" expected_identity="$2" cleanup=""
   [[ -n "$path" ]] || return 0
   if [[ ! -e "$path" && ! -L "$path" ]]; then
     return 0
   fi
   [[ -f "$path" && ! -L "$path" ]] || return 1
   [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
-  rm -f -- "$path"
+  cleanup="$(make_absent_sibling_path "${path}.cleanup")" || return 1
+  atomic_displace_expected_path "$path" "$cleanup" "$expected_identity" || return 1
+  [[ -f "$cleanup" && ! -L "$cleanup" ]] || return 1
+  [[ "$(path_identity "$cleanup" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -f -- "$cleanup"
+}
+
+remove_expected_tree_evidence() {
+  local path="$1" expected_identity="$2" cleanup=""
+  [[ -n "$path" ]] || return 0
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  cleanup="$(make_absent_sibling_path "${path}.cleanup")" || return 1
+  atomic_displace_expected_path "$path" "$cleanup" "$expected_identity" || return 1
+  [[ -d "$cleanup" && ! -L "$cleanup" ]] || return 1
+  [[ "$(path_identity "$cleanup" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -rf -- "$cleanup"
 }
 
 publish_regular_file_transactional() {
@@ -1040,17 +1081,18 @@ validate_regular_publish_destination() {
 
 publish_install_dir_state() {
   local destination="$STATE_DIR/install_dir"
-  local state_tmp
+  local state_tmp state_tmp_identity
 
   validate_regular_publish_destination "$destination" "installation-state" || return 1
   state_tmp="$(mktemp "$STATE_DIR/.install_dir.publish.XXXXXX")" || return 1
+  state_tmp_identity="$(path_identity "$state_tmp")" || return 1
   if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp"; then
-    rm -f -- "$state_tmp" 2>/dev/null || true
+    remove_expected_regular_evidence "$state_tmp" "$state_tmp_identity" >/dev/null 2>&1 || true
     return 1
   fi
 
   if ! publish_regular_file_transactional "$state_tmp" "$destination" "installation-state"; then
-    [[ ! -e "$state_tmp" && ! -L "$state_tmp" ]] || rm -f -- "$state_tmp" 2>/dev/null || true
+    [[ ! -e "$state_tmp" && ! -L "$state_tmp" ]] || remove_expected_regular_evidence "$state_tmp" "$state_tmp_identity" >/dev/null 2>&1 || true
     return 1
   fi
   [[ -f "$destination" && ! -L "$destination" ]] \
@@ -1070,7 +1112,7 @@ move_owned_install_dir() {
 
 legacy_test_rm_injection_probe() {
   local path="$1" rc=0
-  [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]] || return 0
+  [[ "$SSO_INSTALL_TEST_CONTEXT" == "1" ]] || return 0
   declare -F rm >/dev/null 2>&1 || return 0
 
   # Legacy regressions injected rm failures at the original owned path. In the
@@ -1127,7 +1169,7 @@ remove_owned_install_dir() {
   fi
   installation_is_sso_owned "$evidence" || return 1
   [[ "$(path_identity "$evidence" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
-  rm -rf -- "$evidence" || return 1
+  remove_expected_tree_evidence "$evidence" "$expected_identity" || return 1
   [[ ! -e "$evidence" && ! -L "$evidence" ]]
 }
 
@@ -1164,7 +1206,7 @@ install_staged_payload() {
   validate_payload "$stage" || return 1
   validate_existing_install_state || return 1
 
-  local parent new backup had_current=0
+  local parent new new_identity backup had_current=0
   parent="$(dirname "$INSTALL_DIR")"
   backup="${INSTALL_DIR}.bak"
   [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]] && had_current=1
@@ -1179,11 +1221,12 @@ install_staged_payload() {
     err "Could not create a staging directory beside $INSTALL_DIR"
     return 1
   }
+  new_identity="$(path_identity "$new")" || return 1
 
   local f
   for f in "${PAYLOAD_FILES[@]}"; do
     if ! mkdir -p "$new/$(dirname "$f")" || ! cp -a "$stage/$f" "$new/$f"; then
-      rm -rf -- "$new"
+      remove_expected_tree_evidence "$new" "$new_identity" >/dev/null 2>&1 || true
       err "Could not stage payload file: $f"
       return 1
     fi
@@ -1193,14 +1236,14 @@ install_staged_payload() {
     || ! validate_payload "$new" \
     || ! write_managed_install_marker "$new" \
     || ! installation_is_sso_owned "$new"; then
-    rm -rf -- "$new"
+    remove_expected_tree_evidence "$new" "$new_identity" >/dev/null 2>&1 || true
     err "Staged installation failed validation or managed-ownership marking."
     return 1
   fi
 
   if [[ "$had_current" == "1" ]]; then
     if ! replace_owned_install_dir "$INSTALL_DIR" "$backup"; then
-      rm -rf -- "$new" 2>/dev/null || true
+      remove_expected_tree_evidence "$new" "$new_identity" >/dev/null 2>&1 || true
       err "Could not preserve the current installation transactionally."
       return 1
     fi
@@ -1209,9 +1252,7 @@ install_staged_payload() {
   if ! move_owned_install_dir "$new" "$INSTALL_DIR"; then
     err "Could not activate the staged installation."
     if [[ -e "$new" || -L "$new" ]]; then
-      if installation_is_sso_owned "$new"; then
-        rm -rf -- "$new" 2>/dev/null || true
-      fi
+      remove_expected_tree_evidence "$new" "$new_identity" >/dev/null 2>&1 || true
     fi
     if [[ "$had_current" == "1" ]]; then
       if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
@@ -1239,18 +1280,19 @@ install_staged_payload() {
   fi
 }
 install_local() {
-  local tmp rc
+  local tmp tmp_identity rc
   tmp="$(mktemp -d)" || {
     err "Could not create local staging directory."
     return 1
   }
+  tmp_identity="$(path_identity "$tmp")" || return 1
   info "Staging local payload from: $SOURCE_DIR"
   if stage_local_payload "$SOURCE_DIR" "$tmp" && install_staged_payload "$tmp"; then
     rc=0
   else
     rc=1
   fi
-  rm -rf "$tmp"
+  remove_expected_tree_evidence "$tmp" "$tmp_identity" >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -1271,17 +1313,18 @@ download_online() {
   fi
 
   info "Resolved release: $ref @ $commit_sha"
-  local tmp rc
+  local tmp tmp_identity rc
   tmp="$(mktemp -d)" || {
     err "Could not create release staging directory."
     return 1
   }
+  tmp_identity="$(path_identity "$tmp")" || return 1
   if download_release_payload "$commit_sha" "$tmp" && install_staged_payload "$tmp"; then
     rc=0
   else
     rc=1
   fi
-  rm -rf "$tmp"
+  remove_expected_tree_evidence "$tmp" "$tmp_identity" >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -1289,7 +1332,7 @@ create_launcher() {
   validate_runtime_paths || return 1
   [[ -f "$INSTALL_DIR/sso.sh" && ! -L "$INSTALL_DIR/sso.sh" ]] || return 1
 
-  local launcher_dir launcher_tmp
+  local launcher_dir launcher_tmp launcher_tmp_identity
   launcher_dir="$(dirname "$LAUNCHER_PATH")"
   mkdir -p "$launcher_dir" || return 1
 
@@ -1298,13 +1341,14 @@ create_launcher() {
   fi
 
   launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || return 1
+  launcher_tmp_identity="$(path_identity "$launcher_tmp")" || return 1
   if ! render_current_launcher > "$launcher_tmp" || ! chmod 0755 "$launcher_tmp"; then
-    rm -f -- "$launcher_tmp" 2>/dev/null || true
+    remove_expected_regular_evidence "$launcher_tmp" "$launcher_tmp_identity" >/dev/null 2>&1 || true
     return 1
   fi
 
   if ! publish_regular_file_transactional "$launcher_tmp" "$LAUNCHER_PATH" "launcher"; then
-    [[ ! -e "$launcher_tmp" && ! -L "$launcher_tmp" ]] || rm -f -- "$launcher_tmp" 2>/dev/null || true
+    [[ ! -e "$launcher_tmp" && ! -L "$launcher_tmp" ]] || remove_expected_regular_evidence "$launcher_tmp" "$launcher_tmp_identity" >/dev/null 2>&1 || true
     return 1
   fi
 
@@ -1405,6 +1449,6 @@ HELP
   menu "$mode"
 }
 
-if [[ "${SSO_INSTALL_LIB_ONLY:-0}" != "1" ]]; then
+if [[ "$SSO_INSTALL_IS_SOURCED" != "1" ]]; then
   main "$@"
 fi
