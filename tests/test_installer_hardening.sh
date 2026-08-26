@@ -16,6 +16,7 @@ make_installed_payload() {
     mkdir -p "$root/$(dirname "$f")"
     cp -a "$ROOT_DIR/$f" "$root/$f"
   done
+  printf 'schema=sso-managed-install-v1\nrepository=ach1992/simple-server-optimizer\n' > "$root/.sso-managed-install"
 }
 
 
@@ -515,7 +516,8 @@ test_activation_race_preserves_unrelated_destination_and_previous_backup() {
 test_rollback_removal_failure_preserves_previous_backup() {
   local tmp
   tmp="$(mktemp -d)" || return 1
-  mkdir -p "$tmp/install" "$tmp/install.bak"
+  make_installed_payload "$tmp/install"
+  make_installed_payload "$tmp/install.bak"
   printf 'failed-new\n' > "$tmp/install/NEW"
   printf 'previous\n' > "$tmp/install.bak/PREVIOUS"
   (
@@ -743,10 +745,11 @@ test_install_ownership_requires_positive_identity() {
     [[ -f "$INSTALL_DIR/install.sh" && ! -e "$INSTALL_DIR.bak" ]]
   ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
 
+  # Even if a markerless directory begins as one exact recognized full-payload
+  # snapshot, changing any sibling file must revoke destructive authority.
   rm -rf "$tmp/install"
-  make_lookalike_payload "$tmp/install"
-  cp -a "$ROOT_DIR/install.sh" "$tmp/install/install.sh"
-  cp -a "$ROOT_DIR/sso.sh" "$tmp/install/sso.sh"
+  make_installed_payload "$tmp/install"
+  rm -f "$tmp/install/.sso-managed-install"
   ROOT_DIR="$ROOT_DIR" TMPROOT="$tmp" bash -c '
     set -Eeuo pipefail
     export SSO_INSTALL_LIB_ONLY=1
@@ -754,7 +757,30 @@ test_install_ownership_requires_positive_identity() {
     export SSO_STATE_DIR="$TMPROOT/state"
     export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
     source "$ROOT_DIR/install.sh"
+
+    LEGACY_PAYLOAD_GIT_BLOBS=()
+    for f in "${PAYLOAD_FILES[@]}"; do
+      identity="$(legacy_git_blob_identity "$INSTALL_DIR/$f")"
+      LEGACY_PAYLOAD_GIT_BLOBS+=("$f:$identity")
+    done
+    legacy_install_is_sso_owned "$INSTALL_DIR"
+    installation_is_sso_owned "$INSTALL_DIR"
+
+    printf "operator-owned-sibling\n" > "$INSTALL_DIR/modules/firewall.sh"
+    if legacy_install_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
     if installation_is_sso_owned "$INSTALL_DIR"; then exit 1; fi
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  # The production legacy contract itself must cover every payload path exactly
+  # once, in the same order, so no un-fingerprinted sibling can be introduced.
+  ROOT_DIR="$ROOT_DIR" bash -c '
+    set -Eeuo pipefail
+    export SSO_INSTALL_LIB_ONLY=1
+    source "$ROOT_DIR/install.sh"
+    [[ ${#LEGACY_PAYLOAD_GIT_BLOBS[@]} -eq ${#PAYLOAD_FILES[@]} ]]
+    for i in "${!PAYLOAD_FILES[@]}"; do
+      [[ "${LEGACY_PAYLOAD_GIT_BLOBS[$i]%%:*}" == "${PAYLOAD_FILES[$i]}" ]]
+    done
   ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
 
   rm -rf "$tmp/install"
@@ -766,8 +792,6 @@ test_install_ownership_requires_positive_identity() {
     export SSO_STATE_DIR="$TMPROOT/state"
     export SSO_LAUNCHER_PATH="$TMPROOT/bin/sso"
     source "$ROOT_DIR/install.sh"
-    installation_is_sso_owned "$INSTALL_DIR"
-    write_managed_install_marker "$INSTALL_DIR"
     managed_install_marker_is_valid "$INSTALL_DIR"
     installation_is_sso_owned "$INSTALL_DIR"
 
@@ -1013,6 +1037,96 @@ MOCK
   rm -rf "$tmp"
 }
 
+test_manifest_hash_validation_avoids_awk_intervals() {
+  # Debian 11 ships a pre-interval mawk. Keep SHA256 syntax checks expressed
+  # using portable length + character-class predicates instead of `{64}`.
+  if grep -Fq '[0-9a-fA-F]{64}' "$ROOT_DIR/install.sh"; then return 1; fi
+  if grep -Fq '[0-9a-fA-F]{64}' "$ROOT_DIR/scripts/generate_release_manifest.sh"; then return 1; fi
+  grep -Fq 'length($1) != 64 || $1 ~ /[^0-9a-fA-F]/' "$ROOT_DIR/install.sh"
+  grep -Fq 'length($1) != 64 || $1 ~ /[^0-9a-fA-F]/' "$ROOT_DIR/scripts/generate_release_manifest.sh"
+
+  local good bad_short bad_char
+  good="$(printf '%064d' 0)"
+  bad_short="$(printf '%063d' 0)"
+  bad_char="${good%?}g"
+  printf '%s\n%s\n%s\n' "$good" "$bad_short" "$bad_char" | awk '
+    NR == 1 { if (length($1) != 64 || $1 ~ /[^0-9a-fA-F]/) exit 1; next }
+    NR > 1 { if (!(length($1) != 64 || $1 ~ /[^0-9a-fA-F]/)) exit 1 }
+  '
+}
+
+test_manifest_generator_preserves_distinct_inode_replacement() {
+  local tmp case_root before recovery_file
+  tmp="$(mktemp -d)" || return 1
+
+  case_root="$tmp/with-previous"
+  generator_fixture "$case_root"
+  "$case_root/scripts/generate_release_manifest.sh" >/dev/null || { rm -rf "$tmp"; return 1; }
+  before="$(cat "$case_root/release/SHA256SUMS")"
+  mkdir -p "$case_root/bin"
+  cat > "$case_root/bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+destination="${@: -1}"
+source="${@: -2:1}"
+if [[ "$destination" == "release/SHA256SUMS" && "$source" == release/.SHA256SUMS.* \
+  && "$source" != release/.SHA256SUMS.previous.* && "$source" != release/.SHA256SUMS.verify.* ]]; then
+  : > "$MV_FLAG"
+  /usr/bin/mv "$@"
+  replacement="release/.operator-replacement.$$"
+  printf 'operator-manifest\n' > "$replacement"
+  /usr/bin/mv -fT -- "$replacement" "$destination"
+  exit 0
+fi
+exec /usr/bin/mv "$@"
+MOCK
+  chmod +x "$case_root/bin/mv"
+  if MV_FLAG="$case_root/MV_INJECTED" PATH="$case_root/bin:$PATH" \
+    "$case_root/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  [[ -f "$case_root/MV_INJECTED" ]] || { rm -rf "$tmp"; return 1; }
+  [[ "$(cat "$case_root/release/SHA256SUMS")" == 'operator-manifest' ]] || { rm -rf "$tmp"; return 1; }
+  recovery_file="$(find "$case_root/release" -maxdepth 1 -type f -name '.SHA256SUMS.previous.*' -print -quit)"
+  [[ -n "$recovery_file" && -f "$recovery_file" ]] || { rm -rf "$tmp"; return 1; }
+  [[ "$(cat "$recovery_file")" == "$before" ]] || { rm -rf "$tmp"; return 1; }
+
+  case_root="$tmp/without-previous"
+  generator_fixture "$case_root"
+  mkdir -p "$case_root/bin"
+  cat > "$case_root/bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+destination="${@: -1}"
+source="${@: -2:1}"
+if [[ "$destination" == "release/SHA256SUMS" && "$source" == release/.SHA256SUMS.* \
+  && "$source" != release/.SHA256SUMS.previous.* && "$source" != release/.SHA256SUMS.verify.* ]]; then
+  : > "$MV_FLAG"
+  /usr/bin/mv "$@"
+  replacement="release/.operator-replacement.$$"
+  printf 'operator-manifest\n' > "$replacement"
+  /usr/bin/mv -fT -- "$replacement" "$destination"
+  exit 0
+fi
+exec /usr/bin/mv "$@"
+MOCK
+  chmod +x "$case_root/bin/mv"
+  if MV_FLAG="$case_root/MV_INJECTED" PATH="$case_root/bin:$PATH" \
+    "$case_root/scripts/generate_release_manifest.sh" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  [[ -f "$case_root/MV_INJECTED" ]] || { rm -rf "$tmp"; return 1; }
+  [[ "$(cat "$case_root/release/SHA256SUMS")" == 'operator-manifest' ]] || { rm -rf "$tmp"; return 1; }
+  if find "$case_root/release" -maxdepth 1 -type f -name '.SHA256SUMS.previous.*' -print -quit | grep -q .; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  rm -rf "$tmp"
+}
+
 run_test "runtime paths are canonical and durable state/launcher stay outside replaceable trees" test_runtime_paths_are_canonical_and_persistence_is_independent
 run_test "finish_install runs only after successful install/download" test_finish_install_only_runs_after_success
 run_test "runtime payload and checksum manifest reject symlink metadata" test_payload_and_manifest_reject_symlinks
@@ -1035,5 +1149,7 @@ run_test "production runtime paths ignore environment redirects" test_production
 run_test "manifest generator rejects symlinked runtime payload" test_manifest_generator_rejects_symlink_payload
 run_test "manifest generator rejects directory and symlink checksum destinations" test_manifest_generator_rejects_directory_and_symlink_destinations
 run_test "manifest publication failure, false success, and postcondition corruption preserve the previous valid manifest" test_manifest_generator_mv_failure_and_false_success_preserve_previous_manifest
+run_test "manifest hash validation avoids non-portable awk interval expressions" test_manifest_hash_validation_avoids_awk_intervals
+run_test "manifest recovery preserves a distinct-inode operator replacement" test_manifest_generator_preserves_distinct_inode_replacement
 run_test "manifest generation failure preserves the previous manifest" test_manifest_generator_failure_preserves_previous_manifest
 finish_tests

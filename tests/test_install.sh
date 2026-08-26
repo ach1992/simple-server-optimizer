@@ -13,6 +13,7 @@ make_payload() {
   cp -a "$ROOT_DIR/modules/." "$target/modules/"
   cp -a "$ROOT_DIR/assets/whitelist-default.ipv4" "$target/assets/whitelist-default.ipv4"
   cp -a "$ROOT_DIR/assets/blocklist-ip.ipv4" "$target/assets/blocklist-ip.ipv4"
+  printf 'schema=sso-managed-install-v1\nrepository=ach1992/simple-server-optimizer\n' > "$target/.sso-managed-install"
 }
 
 make_manifest() {

@@ -43,6 +43,24 @@ INSTALL_MARKER_SCHEMA="sso-managed-install-v1"
 LAUNCHER_MANAGED_MARKER="# Managed by Simple Server Optimizer."
 LAUNCHER_SCHEMA_MARKER="# SSO Launcher Schema: 1"
 
+# Exact full-payload fingerprints for the one markerless pre-v1.1 baseline that
+# this release supports upgrading in place: main@986aab9aa8540c258ced1c7d8225ff677ae996e7.
+# Each value is path:size:Git-blob-SHA1. All PAYLOAD_FILES must match the same
+# snapshot before markerless legacy content receives destructive authority.
+LEGACY_PAYLOAD_GIT_BLOBS=(
+  'install.sh:5708:9b132122b5abbb08271c0db43a5a6d4862cf98c6'
+  'sso.sh:6295:07d9afbf77c84c684ea7bb1e114da7e6ef8379b7'
+  'modules/utils.sh:5874:4f9642a30cc9edf1f15aa5da50d71b09dc355dad'
+  'modules/network.sh:2315:988d29b2aaa94ff2f4223b10399c33aa262fd0b2'
+  'modules/cpu_irq.sh:5564:6a897625a9f06764584e98154df9eb0e150c7ba5'
+  'modules/firewall.sh:17861:16973d86077285c4da62680b9da5f23ced8573a1'
+  'modules/fail2ban.sh:6625:f60eb802dd261a080004d63438829b7a0d9471d2'
+  'modules/rollback.sh:36045:c8debe8db4c3e43f3828f85c6b485acb244c3987'
+  'modules/uninstall.sh:12270:2285f314bcde21ba8fd3b52d053696e3c6b2141b'
+  'assets/whitelist-default.ipv4:220:ae29bcb2a1e8f4c56e30ae770bdfc0fb8f96315a'
+  'assets/blocklist-ip.ipv4:63582:84bf7ed722a6d8e17e924f3dcfbe85d647b88994'
+)
+
 c_reset="\033[0m"
 c_red="\033[31m"
 c_grn="\033[32m"
@@ -275,18 +293,35 @@ managed_install_marker_is_valid() {
   cmp -s -- "$marker" <(managed_install_marker_expected)
 }
 
-legacy_install_is_sso_owned() {
-  local root="$1"
-  has_payload "$root" || return 1
+legacy_git_blob_identity() {
+  local file="$1" size output sha
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  command -v sha1sum >/dev/null 2>&1 || return 1
+  command -v wc >/dev/null 2>&1 || return 1
 
-  grep -Fxq '#!/usr/bin/env bash' "$root/install.sh" 2>/dev/null \
-    && grep -Fxq 'REPO_SLUG="ach1992/simple-server-optimizer"' "$root/install.sh" 2>/dev/null \
-    && grep -Fxq 'INSTALL_DIR="/root/simple-server-optimizer"' "$root/install.sh" 2>/dev/null \
-    && grep -Fxq 'REPO_URL="https://github.com/ach1992/simple-server-optimizer"' "$root/sso.sh" 2>/dev/null \
-    && grep -Fq 'source "$MODULES_DIR/utils.sh"' "$root/sso.sh" 2>/dev/null \
-    && grep -Fq 'systemd_load_state() {' "$root/modules/utils.sh" 2>/dev/null \
-    && grep -Fq 'module_network_enable_fq_bbr() {' "$root/modules/network.sh" 2>/dev/null \
-    && grep -Fq 'backup_create() {' "$root/modules/rollback.sh" 2>/dev/null
+  size="$(wc -c < "$file")" || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  output="$({ printf 'blob %s\0' "$size"; cat -- "$file"; } | sha1sum)" || return 1
+  sha="${output%% *}"
+  [[ ${#sha} -eq 40 && "$sha" != *[!0-9a-f]* ]] || return 1
+  printf '%s:%s\n' "$size" "$sha"
+}
+
+legacy_install_is_sso_owned() {
+  local root="$1" i f entry expected_path expected_identity actual_identity
+  has_payload "$root" || return 1
+  [[ ${#LEGACY_PAYLOAD_GIT_BLOBS[@]} -eq ${#PAYLOAD_FILES[@]} ]] || return 1
+
+  for i in "${!PAYLOAD_FILES[@]}"; do
+    f="${PAYLOAD_FILES[$i]}"
+    entry="${LEGACY_PAYLOAD_GIT_BLOBS[$i]}"
+    expected_path="${entry%%:*}"
+    expected_identity="${entry#*:}"
+    [[ "$expected_path" == "$f" ]] || return 1
+    [[ "$expected_identity" == *:* ]] || return 1
+    actual_identity="$(legacy_git_blob_identity "$root/$f")" || return 1
+    [[ "$actual_identity" == "$expected_identity" ]] || return 1
+  done
 }
 
 installation_is_sso_owned() {
@@ -690,7 +725,7 @@ verify_release_manifest() {
   if ! awk '
     NF == 0 { next }
     NF != 2 { exit 2 }
-    $1 !~ /^[0-9a-fA-F]{64}$/ { exit 3 }
+    length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 3 }
     {
       path=$2
       sub(/^\*/, "", path)

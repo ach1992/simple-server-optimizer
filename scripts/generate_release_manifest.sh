@@ -40,7 +40,7 @@ manifest_paths_match_payload() {
   printf '%s\n' "${PAYLOAD_FILES[@]}" | LC_ALL=C sort > "$expected"
   if ! awk '
     NF != 2 { exit 1 }
-    $1 !~ /^[0-9a-fA-F]{64}$/ { exit 1 }
+    length($1) != 64 || $1 ~ /[^0-9a-fA-F]/ { exit 1 }
     { path=$2; sub(/^\*/, "", path); print path }
   ' "$manifest" | LC_ALL=C sort > "$actual"; then
     rm -f -- "$expected" "$actual"
@@ -60,17 +60,21 @@ validate_manifest_destination() {
 }
 
 restore_previous_manifest() {
-  local previous="$1" destination="$2"
-  if [[ -n "$previous" && -f "$previous" && ! -L "$previous" ]]; then
-    if validate_manifest_destination "$destination"; then
-      mv -fT -- "$previous" "$destination" >/dev/null 2>&1 || return 1
-      [[ -f "$destination" && ! -L "$destination" && ! -e "$previous" ]]
-      return
-    fi
-    return 1
+  local previous="$1" destination="$2" published_identity="$3" current_identity=""
+
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" ]] || return 1
+    current_identity="$(stat -c '%d:%i' "$destination" 2>/dev/null)" || return 1
+    [[ -n "$published_identity" && "$current_identity" == "$published_identity" ]] || return 1
   fi
 
-  if [[ -f "$destination" && ! -L "$destination" ]]; then
+  if [[ -n "$previous" && -f "$previous" && ! -L "$previous" ]]; then
+    mv -fT -- "$previous" "$destination" >/dev/null 2>&1 || return 1
+    [[ -f "$destination" && ! -L "$destination" && ! -e "$previous" ]]
+    return
+  fi
+
+  if [[ -e "$destination" || -L "$destination" ]]; then
     rm -f -- "$destination" || return 1
   fi
   [[ ! -e "$destination" && ! -L "$destination" ]]
@@ -98,9 +102,13 @@ validate_manifest_destination "$manifest_path" || {
 manifest_tmp="$(mktemp release/.SHA256SUMS.XXXXXX)" || exit 1
 previous_tmp=""
 verify_tmp=""
+published_identity=""
+preserve_previous_tmp=0
 cleanup() {
   [[ -z "$manifest_tmp" ]] || rm -f -- "$manifest_tmp" 2>/dev/null || true
-  [[ -z "$previous_tmp" ]] || rm -f -- "$previous_tmp" 2>/dev/null || true
+  if [[ "$preserve_previous_tmp" != "1" && -n "$previous_tmp" ]]; then
+    rm -f -- "$previous_tmp" 2>/dev/null || true
+  fi
   [[ -z "$verify_tmp" ]] || rm -f -- "$verify_tmp" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -119,6 +127,7 @@ fi
 
 verify_tmp="$(mktemp release/.SHA256SUMS.verify.XXXXXX)" || exit 1
 cp -- "$manifest_tmp" "$verify_tmp" || exit 1
+published_identity="$(stat -c '%d:%i' "$manifest_tmp" 2>/dev/null)" || exit 1
 
 validate_manifest_destination "$manifest_path" || {
   printf 'Release checksum destination changed to an unsafe type before publication.\n' >&2
@@ -135,11 +144,20 @@ if [[ -e "$manifest_tmp" || -L "$manifest_tmp" ]]; then
 fi
 manifest_tmp=""
 
+current_identity=""
+if [[ -f "$manifest_path" && ! -L "$manifest_path" ]]; then
+  current_identity="$(stat -c '%d:%i' "$manifest_path" 2>/dev/null || true)"
+fi
 if [[ ! -f "$manifest_path" || -L "$manifest_path" ]] \
+  || [[ "$current_identity" != "$published_identity" ]] \
   || ! cmp -s -- "$manifest_path" "$verify_tmp" \
   || ! manifest_paths_match_payload "$manifest_path"; then
   printf 'Published release checksum manifest failed postcondition verification.\n' >&2
-  if ! restore_previous_manifest "$previous_tmp" "$manifest_path"; then
+  if ! restore_previous_manifest "$previous_tmp" "$manifest_path" "$published_identity"; then
+    if [[ -n "$previous_tmp" && -f "$previous_tmp" && ! -L "$previous_tmp" ]]; then
+      preserve_previous_tmp=1
+      printf 'Previous manifest preserved at: %s\n' "$previous_tmp" >&2
+    fi
     printf 'Previous manifest could not be restored automatically.\n' >&2
   else
     previous_tmp=""
