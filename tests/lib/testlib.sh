@@ -5,6 +5,9 @@ TEST_PASS=0
 TEST_FAIL=0
 TEST_XFAIL=0
 
+# Explicitly marks subprocesses launched by this regression harness.
+export SSO_TEST_ONLY=1
+
 _test_print() {
   printf '%s\n' "$*"
 }

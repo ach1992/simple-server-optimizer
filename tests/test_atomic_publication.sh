@@ -50,6 +50,22 @@ atomic_real_race_is_untouched() {
   [[ "$(cat "$t/source")" == source && "$(cat "$t/destination")" == operator ]]
 }
 
+atomic_post_rename_replacement_is_untouched() {
+  local t; t="$(mktemp -d)"
+  load_installer "$t"
+  printf source > "$t/source"
+  eval "$(declare -f rename_noreplace | sed '1s/rename_noreplace/real_rename_noreplace/')"
+  rename_noreplace() {
+    local source="$1" destination="$2" replacement
+    real_rename_noreplace "$source" "$destination" || return
+    replacement="${destination}.operator.$$"
+    printf operator > "$replacement"
+    command mv -fT -- "$replacement" "$destination"
+  }
+  if atomic_move_noreplace "$t/source" "$t/destination"; then return 1; fi
+  [[ ! -e "$t/source" && "$(cat "$t/destination")" == operator ]]
+}
+
 state_publication_real_race_preserves_both_sides() {
   local t; t="$(mktemp -d)"
   load_installer "$t"
@@ -65,7 +81,7 @@ state_publication_real_race_preserves_both_sides() {
   }
   if publish_install_dir_state >/dev/null 2>&1; then return 1; fi
   [[ "$(cat "$STATE_DIR/install_dir")" == operator ]]
-  compgen -G "$STATE_DIR/.install_dir.installation-state.previous.*" >/dev/null
+  compgen -G "$STATE_DIR/.install_dir.previous.*" >/dev/null
 }
 
 launcher_publication_real_race_preserves_operator_file() {
@@ -76,7 +92,7 @@ launcher_publication_real_race_preserves_operator_file() {
   eval "$(declare -f rename_noreplace | sed '1s/rename_noreplace/real_rename_noreplace/')"
   rename_noreplace() {
     local source="$1" destination="$2"
-    if [[ "$source" == "$LAUNCHER_PATH.publish."* && "$destination" == "$LAUNCHER_PATH" ]]; then
+    if [[ "$source" == "$LAUNCHER_PATH.tmp."* && "$destination" == "$LAUNCHER_PATH" ]]; then
       printf operator > "$destination"
     fi
     real_rename_noreplace "$source" "$destination"
@@ -160,7 +176,7 @@ source_path="\${2:-}"; destination="\${3:-}"
 if [[ "\$destination" == 'release/SHA256SUMS' && "\$source_path" == *'.SHA256SUMS.publish.'* ]]; then
   "$real_python" "\$@"; printf 'corrupt-published\n' > "\$destination"; exit 0
 fi
-if [[ "\$destination" == 'release/SHA256SUMS' && "\$source_path" == *'.SHA256SUMS.restore.'* ]]; then
+if [[ "\$destination" == 'release/SHA256SUMS' && "\$source_path" == *'.restore-SHA256SUMS.'* ]]; then
   "$real_python" "\$@"; printf 'corrupt-restored\n' > "\$destination"; exit 0
 fi
 exec "$real_python" "\$@"
@@ -174,10 +190,11 @@ MOCK
 
 run_case 'atomic existing destination is untouched' atomic_existing_destination_is_untouched
 run_case 'atomic real race is untouched' atomic_real_race_is_untouched
+run_case 'atomic post-rename replacement is untouched' atomic_post_rename_replacement_is_untouched
 run_case 'state publication real race preserves both sides' state_publication_real_race_preserves_both_sides
 run_case 'launcher publication real race preserves operator file' launcher_publication_real_race_preserves_operator_file
 run_case 'backup rotation real race preserves operator destination' backup_rotation_real_race_preserves_operator_destination
 run_case 'manifest corrupt previous-copy success is rejected' manifest_previous_copy_corrupt_success_is_rejected
 run_case 'manifest real race preserves operator destination' manifest_real_race_preserves_operator_destination
 run_case 'manifest corrupt recovery preserves original previous copy' manifest_corrupt_recovery_preserves_original_previous_copy
-printf 'atomic publication regressions: %d/8 PASS\n' "$pass"
+printf 'atomic publication regressions: %d/9 PASS\n' "$pass"

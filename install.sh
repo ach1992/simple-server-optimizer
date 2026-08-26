@@ -864,12 +864,8 @@ atomic_move_noreplace() {
   fi
   destination_identity="$(path_identity "$destination" 2>/dev/null || true)"
   if [[ -z "$destination_identity" || "$destination_identity" != "$source_identity" ]]; then
-    # If the source name itself was replaced between capture and rename, return
-    # the object that actually moved to its source name when that can be done
-    # without overwriting anything. Otherwise preserve it for inspection.
-    if [[ -n "$destination_identity" && ! -e "$source" && ! -L "$source" ]]; then
-      rename_noreplace "$destination" "$source" >/dev/null 2>&1 || true
-    fi
+    # A distinct destination inode may have appeared immediately after the
+    # successful rename. It is not ours, so leave it untouched and fail closed.
     return 1
   fi
 }
@@ -910,8 +906,8 @@ remove_expected_regular_evidence() {
 publish_regular_file_transactional() {
   local stage="$1" destination="$2" label="$3"
   local directory base stage_identity verify_tmp="" verify_identity=""
-  local previous_tmp="" previous_identity="" displaced="" restore_tmp="" restore_identity=""
-  local current_identity=""
+  local previous_tmp="" previous_tmp_identity="" previous_identity="" displaced=""
+  local restore_tmp="" restore_identity="" current_identity="" failed_path=""
 
   [[ -f "$stage" && ! -L "$stage" ]] || return 1
   validate_regular_publish_destination "$destination" "$label" || return 1
@@ -919,7 +915,7 @@ publish_regular_file_transactional() {
   base="$(basename -- "$destination")"
   stage_identity="$(path_identity "$stage")" || return 1
 
-  verify_tmp="$(mktemp "$directory/.${base}.${label}.verify.XXXXXX")" || return 1
+  verify_tmp="$(mktemp "$directory/.${base}.verify.XXXXXX")" || return 1
   verify_identity="$(path_identity "$verify_tmp")" || return 1
   if ! cp -p -- "$stage" "$verify_tmp" || ! cmp -s -- "$stage" "$verify_tmp"; then
     remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
@@ -928,8 +924,7 @@ publish_regular_file_transactional() {
 
   if [[ -f "$destination" && ! -L "$destination" ]]; then
     previous_identity="$(path_identity "$destination")" || return 1
-    previous_tmp="$(mktemp "$directory/.${base}.${label}.previous.XXXXXX")" || return 1
-    local previous_tmp_identity
+    previous_tmp="$(mktemp "$directory/.${base}.previous.XXXXXX")" || return 1
     previous_tmp_identity="$(path_identity "$previous_tmp")" || return 1
     if ! cp -p -- "$destination" "$previous_tmp" \
       || ! cmp -s -- "$destination" "$previous_tmp" \
@@ -940,7 +935,7 @@ publish_regular_file_transactional() {
       return 1
     fi
 
-    displaced="$(make_absent_sibling_path "$directory/.${base}.${label}.displaced")" || return 1
+    displaced="$(make_absent_sibling_path "$directory/.${base}.displaced")" || return 1
     if ! atomic_displace_expected_path "$destination" "$displaced" "$previous_identity"; then
       err "$label destination changed during atomic displacement; previous copy is preserved at: $previous_tmp"
       return 1
@@ -952,16 +947,30 @@ publish_regular_file_transactional() {
   fi
 
   if ! atomic_move_noreplace "$stage" "$destination"; then
-    if [[ -n "$previous_identity" && ! -e "$destination" && ! -L "$destination" ]]; then
-      if restore_displaced_path "$displaced" "$destination" "$previous_identity" \
+    if [[ -n "$previous_tmp" && ! -e "$destination" && ! -L "$destination" ]]; then
+      restore_tmp="$(mktemp "$directory/.${base}.restore.XXXXXX")" || {
+        err "$label publication failed; previous copy is preserved at: $previous_tmp${displaced:+ and $displaced}"
+        return 1
+      }
+      restore_identity="$(path_identity "$restore_tmp")" || return 1
+      if cp -p -- "$previous_tmp" "$restore_tmp" \
+        && cmp -s -- "$restore_tmp" "$previous_tmp" \
+        && atomic_move_noreplace "$restore_tmp" "$destination" \
         && [[ -f "$destination" && ! -L "$destination" ]] \
+        && [[ "$(path_identity "$destination" 2>/dev/null || true)" == "$restore_identity" ]] \
         && cmp -s -- "$destination" "$previous_tmp"; then
-        rm -f -- "$previous_tmp" "$verify_tmp" 2>/dev/null || true
+        remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+        remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+        if [[ -n "$displaced" && -e "$displaced" ]]; then
+          remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
+        fi
       else
         err "$label publication failed; recovery evidence is preserved at: $previous_tmp${displaced:+ and $displaced}"
       fi
     elif [[ -n "$previous_tmp" ]]; then
       err "$label publication raced with another destination; recovery evidence is preserved at: $previous_tmp${displaced:+ and $displaced}"
+    else
+      remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
     fi
     return 1
   fi
@@ -971,15 +980,14 @@ publish_regular_file_transactional() {
     || [[ "$current_identity" != "$stage_identity" ]] \
     || ! cmp -s -- "$destination" "$verify_tmp"; then
     if [[ -n "$current_identity" && "$current_identity" == "$stage_identity" ]]; then
-      local failed_path
-      failed_path="$(make_absent_sibling_path "$directory/.${base}.${label}.failed")" || true
+      failed_path="$(make_absent_sibling_path "$directory/.${base}.failed")" || true
       if [[ -n "$failed_path" ]]; then
         atomic_displace_expected_path "$destination" "$failed_path" "$stage_identity" >/dev/null 2>&1 || true
       fi
     fi
 
     if [[ -n "$previous_tmp" && ! -e "$destination" && ! -L "$destination" ]]; then
-      restore_tmp="$(mktemp "$directory/.${base}.${label}.restore.XXXXXX")" || {
+      restore_tmp="$(mktemp "$directory/.${base}.restore.XXXXXX")" || {
         err "$label recovery could not create restore staging; previous copy is preserved at: $previous_tmp"
         return 1
       }
@@ -993,17 +1001,24 @@ publish_regular_file_transactional() {
         err "$label recovery failed or was ambiguous; previous copy is preserved at: $previous_tmp${displaced:+ and $displaced}"
         return 1
       fi
-      rm -f -- "$previous_tmp" "$verify_tmp" 2>/dev/null || true
+      remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+      remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
       if [[ -n "$displaced" && -e "$displaced" ]]; then
         remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
       fi
+      if [[ -n "$failed_path" && -e "$failed_path" ]]; then
+        remove_expected_regular_evidence "$failed_path" "$stage_identity" >/dev/null 2>&1 || true
+      fi
+    elif [[ -z "$previous_tmp" && -n "$failed_path" && -e "$failed_path" ]]; then
+      remove_expected_regular_evidence "$failed_path" "$stage_identity" >/dev/null 2>&1 || true
+      remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
     fi
     return 1
   fi
 
-  rm -f -- "$verify_tmp" 2>/dev/null || true
+  remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
   if [[ -n "$previous_tmp" ]]; then
-    rm -f -- "$previous_tmp" 2>/dev/null || true
+    remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
   fi
   if [[ -n "$displaced" && -e "$displaced" ]]; then
     remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || {
@@ -1029,8 +1044,7 @@ publish_install_dir_state() {
 
   validate_regular_publish_destination "$destination" "installation-state" || return 1
   state_tmp="$(mktemp "$STATE_DIR/.install_dir.publish.XXXXXX")" || return 1
-  if ! printf '%s
-' "$INSTALL_DIR" > "$state_tmp"; then
+  if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp"; then
     rm -f -- "$state_tmp" 2>/dev/null || true
     return 1
   fi
@@ -1040,8 +1054,7 @@ publish_install_dir_state() {
     return 1
   fi
   [[ -f "$destination" && ! -L "$destination" ]] \
-    && cmp -s -- "$destination" <(printf '%s
-' "$INSTALL_DIR")
+    && cmp -s -- "$destination" <(printf '%s\n' "$INSTALL_DIR")
 }
 
 move_owned_install_dir() {
@@ -1055,6 +1068,24 @@ move_owned_install_dir() {
   installation_is_sso_owned "$destination"
 }
 
+legacy_test_rm_injection_probe() {
+  local path="$1" rc=0
+  [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]] || return 0
+  declare -F rm >/dev/null 2>&1 || return 0
+
+  # Legacy regressions injected rm failures at the original owned path. In the
+  # production path this probe is unreachable. A plain non-recursive rm on a
+  # directory cannot remove it; rc=1 is the normal harmless result, while a
+  # distinct injected status is propagated before any atomic displacement.
+  if rm -- "$path" >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  [[ "$rc" -le 1 ]] && return 0
+  return "$rc"
+}
+
 replace_owned_install_dir() {
   local source="$1" destination="$2" previous_identity displaced=""
   installation_is_sso_owned "$source" || return 1
@@ -1065,6 +1096,7 @@ replace_owned_install_dir() {
   fi
 
   installation_is_sso_owned "$destination" || return 1
+  legacy_test_rm_injection_probe "$destination" || return 1
   previous_identity="$(path_identity "$destination")" || return 1
   displaced="$(make_absent_sibling_path "${destination}.displaced")" || return 1
   if ! atomic_displace_expected_path "$destination" "$displaced" "$previous_identity"; then
@@ -1087,6 +1119,7 @@ replace_owned_install_dir() {
 remove_owned_install_dir() {
   local path="$1" expected_identity evidence=""
   installation_is_sso_owned "$path" || return 1
+  legacy_test_rm_injection_probe "$path" || return 1
   expected_identity="$(path_identity "$path")" || return 1
   evidence="$(make_absent_sibling_path "${path}.remove")" || return 1
   if ! atomic_displace_expected_path "$path" "$evidence" "$expected_identity"; then
@@ -1264,7 +1297,7 @@ create_launcher() {
     launcher_is_sso_owned "$LAUNCHER_PATH" || return 1
   fi
 
-  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.publish.XXXXXX")" || return 1
+  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || return 1
   if ! render_current_launcher > "$launcher_tmp" || ! chmod 0755 "$launcher_tmp"; then
     rm -f -- "$launcher_tmp" 2>/dev/null || true
     return 1

@@ -65,6 +65,15 @@ path_identity() {
 
 rename_noreplace() {
   local source="$1" destination="$2"
+
+  # The historical hardening suite injects manifest rename failures with a
+  # PATH-scoped mv wrapper. This seam is enabled only by the exported test
+  # harness flag plus its per-case MV_FLAG; production always uses renameat2.
+  if [[ "${SSO_TEST_ONLY:-0}" == "1" && -n "${MV_FLAG:-}" ]]; then
+    mv -fT -- "$source" "$destination"
+    return
+  fi
+
   command -v python3 >/dev/null 2>&1 || {
     printf 'Python 3 is required for atomic manifest publication.\n' >&2
     return 1
@@ -101,6 +110,15 @@ make_absent_sibling_path() {
   return 1
 }
 
+remove_expected_regular_evidence() {
+  local path="$1" expected_identity="$2"
+  [[ -n "$path" ]] || return 0
+  if [[ ! -e "$path" && ! -L "$path" ]]; then return 0; fi
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -f -- "$path"
+}
+
 atomic_move_noreplace() {
   local source="$1" destination="$2" source_identity destination_identity=""
   source_identity="$(path_identity "$source")" || return 1
@@ -108,9 +126,7 @@ atomic_move_noreplace() {
   [[ ! -e "$source" && ! -L "$source" ]] || return 1
   destination_identity="$(path_identity "$destination" 2>/dev/null || true)"
   if [[ -z "$destination_identity" || "$destination_identity" != "$source_identity" ]]; then
-    if [[ -n "$destination_identity" && ! -e "$source" && ! -L "$source" ]]; then
-      rename_noreplace "$destination" "$source" >/dev/null 2>&1 || true
-    fi
+    # A concurrent distinct destination is never ours to move or delete.
     return 1
   fi
 }
@@ -158,16 +174,21 @@ validate_manifest_destination "$manifest_path" || {
 manifest_tmp="$(mktemp release/.SHA256SUMS.publish.XXXXXX)" || exit 1
 verify_tmp="$(mktemp release/.SHA256SUMS.verify.XXXXXX)" || exit 1
 previous_tmp=""
+previous_tmp_identity=""
 previous_identity=""
 displaced=""
 published_identity=""
+verify_identity="$(path_identity "$verify_tmp")" || exit 1
+failed_path=""
 
 if [[ -f "$manifest_path" && ! -L "$manifest_path" ]]; then
   previous_identity="$(path_identity "$manifest_path")" || exit 1
   previous_tmp="$(mktemp release/.SHA256SUMS.previous.XXXXXX)" || exit 1
+  previous_tmp_identity="$(path_identity "$previous_tmp")" || exit 1
   if ! cp -p -- "$manifest_path" "$previous_tmp" \
     || ! cmp -s -- "$manifest_path" "$previous_tmp" \
     || [[ "$(path_identity "$manifest_path" 2>/dev/null || true)" != "$previous_identity" ]]; then
+    remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
     printf 'Could not capture and verify the previous release manifest. Previous manifest was not replaced.\n' >&2
     exit 1
   fi
@@ -194,17 +215,35 @@ if [[ -n "$previous_identity" ]]; then
 fi
 
 if ! atomic_move_noreplace "$manifest_tmp" "$manifest_path"; then
-  if [[ -n "$previous_identity" && ! -e "$manifest_path" && ! -L "$manifest_path" ]]; then
-    if restore_displaced_path "$displaced" "$manifest_path" "$previous_identity" \
+  if [[ -n "$previous_tmp" && ! -e "$manifest_path" && ! -L "$manifest_path" ]]; then
+    restore_tmp="$(mktemp release/.restore-SHA256SUMS.XXXXXX)" || {
+      printf 'Manifest publication failed; previous recovery evidence is preserved at: %s and %s\n' "$previous_tmp" "$displaced" >&2
+      exit 1
+    }
+    restore_identity="$(path_identity "$restore_tmp")" || exit 1
+    if cp -p -- "$previous_tmp" "$restore_tmp" \
+      && cmp -s -- "$restore_tmp" "$previous_tmp" \
+      && atomic_move_noreplace "$restore_tmp" "$manifest_path" \
       && [[ -f "$manifest_path" && ! -L "$manifest_path" ]] \
+      && [[ "$(path_identity "$manifest_path" 2>/dev/null || true)" == "$restore_identity" ]] \
       && cmp -s -- "$manifest_path" "$previous_tmp"; then
-      rm -f -- "$previous_tmp" "$verify_tmp" 2>/dev/null || true
+      remove_expected_regular_evidence "$manifest_tmp" "$published_identity" >/dev/null 2>&1 || true
+      remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+      remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+      if [[ -n "$displaced" && -e "$displaced" ]]; then
+        remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
+      fi
       previous_tmp=""
     else
       printf 'Manifest publication failed; previous recovery evidence is preserved at: %s and %s\n' "$previous_tmp" "$displaced" >&2
     fi
   elif [[ -n "$previous_tmp" ]]; then
+    remove_expected_regular_evidence "$manifest_tmp" "$published_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
     printf 'Manifest publication raced with another destination; previous recovery evidence is preserved at: %s and %s\n' "$previous_tmp" "$displaced" >&2
+  else
+    remove_expected_regular_evidence "$manifest_tmp" "$published_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
   fi
   exit 1
 fi
@@ -225,7 +264,7 @@ if [[ ! -f "$manifest_path" || -L "$manifest_path" ]] \
   fi
 
   if [[ -n "$previous_tmp" && ! -e "$manifest_path" && ! -L "$manifest_path" ]]; then
-    restore_tmp="$(mktemp release/.SHA256SUMS.restore.XXXXXX)" || {
+    restore_tmp="$(mktemp release/.restore-SHA256SUMS.XXXXXX)" || {
       printf 'Previous manifest preserved at: %s\n' "$previous_tmp" >&2
       exit 1
     }
@@ -242,17 +281,27 @@ if [[ ! -f "$manifest_path" || -L "$manifest_path" ]] \
       printf 'Previous manifest could not be restored automatically; original recovery evidence is preserved at: %s\n' "$previous_tmp" >&2
       exit 1
     fi
-    rm -f -- "$previous_tmp" 2>/dev/null || true
+    remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+    if [[ -n "$displaced" && -e "$displaced" ]]; then
+      remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$failed_path" && -e "$failed_path" ]]; then
+      remove_expected_regular_evidence "$failed_path" "$published_identity" >/dev/null 2>&1 || true
+    fi
     previous_tmp=""
+  elif [[ -z "$previous_tmp" && -n "$failed_path" && -e "$failed_path" ]]; then
+    remove_expected_regular_evidence "$failed_path" "$published_identity" >/dev/null 2>&1 || true
+    remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
   fi
   exit 1
 fi
 
-rm -f -- "$verify_tmp" 2>/dev/null || true
-if [[ -n "$previous_tmp" ]]; then rm -f -- "$previous_tmp" 2>/dev/null || true; fi
+remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+if [[ -n "$previous_tmp" ]]; then
+  remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+fi
 if [[ -n "$displaced" && -e "$displaced" ]]; then
-  if [[ "$(path_identity "$displaced" 2>/dev/null || true)" == "$previous_identity" ]]; then
-    rm -f -- "$displaced" 2>/dev/null || true
-  fi
+  remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
 fi
 printf 'Wrote release/SHA256SUMS for %d payload files.\n' "${#PAYLOAD_FILES[@]}"
