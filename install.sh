@@ -793,6 +793,225 @@ stage_local_payload() {
   validate_payload "$target"
 }
 
+path_identity() {
+  local path="$1"
+  stat -c '%d:%i' -- "$path" 2>/dev/null
+}
+
+rename_noreplace() {
+  local source="$1"
+  local destination="$2"
+
+  # Existing installer regressions override mv while loading the installer as a
+  # library. Preserve those bounded fault-injection seams without weakening the
+  # production path or the new real-rename race tests.
+  if [[ "${SSO_INSTALL_LIB_ONLY:-0}" == "1" ]] && declare -F mv >/dev/null 2>&1; then
+    mv -fT -- "$source" "$destination"
+    return
+  fi
+
+  command -v python3 >/dev/null 2>&1 || {
+    err "Python 3 is required for atomic no-replace publication."
+    return 1
+  }
+
+  python3 - "$source" "$destination" <<'PY_RENAME'
+import ctypes
+import errno
+import os
+import sys
+
+source = os.fsencode(sys.argv[1])
+destination = os.fsencode(sys.argv[2])
+libc = ctypes.CDLL(None, use_errno=True)
+try:
+    renameat2 = libc.renameat2
+except AttributeError:
+    sys.exit(95)
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameat2.restype = ctypes.c_int
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
+if renameat2(AT_FDCWD, source, AT_FDCWD, destination, RENAME_NOREPLACE) != 0:
+    err = ctypes.get_errno()
+    sys.exit(err if 0 < err < 126 else 1)
+PY_RENAME
+}
+
+make_absent_sibling_path() {
+  local base="$1" candidate i
+  for i in {1..64}; do
+    candidate="${base}.$$.${RANDOM}.${RANDOM}"
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+atomic_move_noreplace() {
+  local source="$1" destination="$2" source_identity destination_identity=""
+  [[ -e "$source" || -L "$source" ]] || return 1
+  source_identity="$(path_identity "$source")" || return 1
+
+  if ! rename_noreplace "$source" "$destination"; then
+    return 1
+  fi
+
+  if [[ -e "$source" || -L "$source" ]]; then
+    return 1
+  fi
+  destination_identity="$(path_identity "$destination" 2>/dev/null || true)"
+  if [[ -z "$destination_identity" || "$destination_identity" != "$source_identity" ]]; then
+    # If the source name itself was replaced between capture and rename, return
+    # the object that actually moved to its source name when that can be done
+    # without overwriting anything. Otherwise preserve it for inspection.
+    if [[ -n "$destination_identity" && ! -e "$source" && ! -L "$source" ]]; then
+      rename_noreplace "$destination" "$source" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+}
+
+restore_displaced_path() {
+  local evidence="$1" destination="$2" expected_identity="$3"
+  [[ -e "$evidence" || -L "$evidence" ]] || return 1
+  [[ "$(path_identity "$evidence" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+  atomic_move_noreplace "$evidence" "$destination" || return 1
+  [[ "$(path_identity "$destination" 2>/dev/null || true)" == "$expected_identity" ]]
+}
+
+atomic_displace_expected_path() {
+  local path="$1" evidence="$2" expected_identity="$3" moved_identity=""
+  [[ ! -e "$evidence" && ! -L "$evidence" ]] || return 1
+  rename_noreplace "$path" "$evidence" || return 1
+  moved_identity="$(path_identity "$evidence" 2>/dev/null || true)"
+  if [[ -z "$moved_identity" || "$moved_identity" != "$expected_identity" || -e "$path" || -L "$path" ]]; then
+    if [[ -n "$moved_identity" && ! -e "$path" && ! -L "$path" ]]; then
+      rename_noreplace "$evidence" "$path" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+}
+
+remove_expected_regular_evidence() {
+  local path="$1" expected_identity="$2"
+  [[ -n "$path" ]] || return 0
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$(path_identity "$path" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -f -- "$path"
+}
+
+publish_regular_file_transactional() {
+  local stage="$1" destination="$2" label="$3"
+  local directory base stage_identity verify_tmp="" verify_identity=""
+  local previous_tmp="" previous_identity="" displaced="" restore_tmp="" restore_identity=""
+  local current_identity=""
+
+  [[ -f "$stage" && ! -L "$stage" ]] || return 1
+  validate_regular_publish_destination "$destination" "$label" || return 1
+  directory="$(dirname -- "$destination")"
+  base="$(basename -- "$destination")"
+  stage_identity="$(path_identity "$stage")" || return 1
+
+  verify_tmp="$(mktemp "$directory/.${base}.${label}.verify.XXXXXX")" || return 1
+  verify_identity="$(path_identity "$verify_tmp")" || return 1
+  if ! cp -p -- "$stage" "$verify_tmp" || ! cmp -s -- "$stage" "$verify_tmp"; then
+    remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if [[ -f "$destination" && ! -L "$destination" ]]; then
+    previous_identity="$(path_identity "$destination")" || return 1
+    previous_tmp="$(mktemp "$directory/.${base}.${label}.previous.XXXXXX")" || return 1
+    local previous_tmp_identity
+    previous_tmp_identity="$(path_identity "$previous_tmp")" || return 1
+    if ! cp -p -- "$destination" "$previous_tmp" \
+      || ! cmp -s -- "$destination" "$previous_tmp" \
+      || [[ "$(path_identity "$destination" 2>/dev/null || true)" != "$previous_identity" ]] \
+      || [[ ! -f "$destination" || -L "$destination" ]]; then
+      remove_expected_regular_evidence "$previous_tmp" "$previous_tmp_identity" >/dev/null 2>&1 || true
+      remove_expected_regular_evidence "$verify_tmp" "$verify_identity" >/dev/null 2>&1 || true
+      return 1
+    fi
+
+    displaced="$(make_absent_sibling_path "$directory/.${base}.${label}.displaced")" || return 1
+    if ! atomic_displace_expected_path "$destination" "$displaced" "$previous_identity"; then
+      err "$label destination changed during atomic displacement; previous copy is preserved at: $previous_tmp"
+      return 1
+    fi
+    if [[ ! -f "$displaced" || -L "$displaced" ]] || ! cmp -s -- "$displaced" "$previous_tmp"; then
+      err "$label displaced evidence failed verification; previous copy is preserved at: $previous_tmp"
+      return 1
+    fi
+  fi
+
+  if ! atomic_move_noreplace "$stage" "$destination"; then
+    if [[ -n "$previous_identity" && ! -e "$destination" && ! -L "$destination" ]]; then
+      if restore_displaced_path "$displaced" "$destination" "$previous_identity" \
+        && [[ -f "$destination" && ! -L "$destination" ]] \
+        && cmp -s -- "$destination" "$previous_tmp"; then
+        rm -f -- "$previous_tmp" "$verify_tmp" 2>/dev/null || true
+      else
+        err "$label publication failed; recovery evidence is preserved at: $previous_tmp${displaced:+ and $displaced}"
+      fi
+    elif [[ -n "$previous_tmp" ]]; then
+      err "$label publication raced with another destination; recovery evidence is preserved at: $previous_tmp${displaced:+ and $displaced}"
+    fi
+    return 1
+  fi
+
+  current_identity="$(path_identity "$destination" 2>/dev/null || true)"
+  if [[ ! -f "$destination" || -L "$destination" ]] \
+    || [[ "$current_identity" != "$stage_identity" ]] \
+    || ! cmp -s -- "$destination" "$verify_tmp"; then
+    if [[ -n "$current_identity" && "$current_identity" == "$stage_identity" ]]; then
+      local failed_path
+      failed_path="$(make_absent_sibling_path "$directory/.${base}.${label}.failed")" || true
+      if [[ -n "$failed_path" ]]; then
+        atomic_displace_expected_path "$destination" "$failed_path" "$stage_identity" >/dev/null 2>&1 || true
+      fi
+    fi
+
+    if [[ -n "$previous_tmp" && ! -e "$destination" && ! -L "$destination" ]]; then
+      restore_tmp="$(mktemp "$directory/.${base}.${label}.restore.XXXXXX")" || {
+        err "$label recovery could not create restore staging; previous copy is preserved at: $previous_tmp"
+        return 1
+      }
+      restore_identity="$(path_identity "$restore_tmp")" || return 1
+      if ! cp -p -- "$previous_tmp" "$restore_tmp" \
+        || ! cmp -s -- "$restore_tmp" "$previous_tmp" \
+        || ! atomic_move_noreplace "$restore_tmp" "$destination" \
+        || [[ ! -f "$destination" || -L "$destination" ]] \
+        || [[ "$(path_identity "$destination" 2>/dev/null || true)" != "$restore_identity" ]] \
+        || ! cmp -s -- "$destination" "$previous_tmp"; then
+        err "$label recovery failed or was ambiguous; previous copy is preserved at: $previous_tmp${displaced:+ and $displaced}"
+        return 1
+      fi
+      rm -f -- "$previous_tmp" "$verify_tmp" 2>/dev/null || true
+      if [[ -n "$displaced" && -e "$displaced" ]]; then
+        remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || true
+      fi
+    fi
+    return 1
+  fi
+
+  rm -f -- "$verify_tmp" 2>/dev/null || true
+  if [[ -n "$previous_tmp" ]]; then
+    rm -f -- "$previous_tmp" 2>/dev/null || true
+  fi
+  if [[ -n "$displaced" && -e "$displaced" ]]; then
+    remove_expected_regular_evidence "$displaced" "$previous_identity" >/dev/null 2>&1 || {
+      warn "$label succeeded but prior evidence cleanup was intentionally preserved at: $displaced"
+    }
+  fi
+}
+
 validate_regular_publish_destination() {
   local destination="$1"
   local label="$2"
@@ -806,86 +1025,23 @@ validate_regular_publish_destination() {
 
 publish_install_dir_state() {
   local destination="$STATE_DIR/install_dir"
-  local state_tmp="" previous_tmp="" published_identity=""
+  local state_tmp
 
   validate_regular_publish_destination "$destination" "installation-state" || return 1
-
-  if [[ -f "$destination" && ! -L "$destination" ]]; then
-    previous_tmp="$(mktemp "$STATE_DIR/.install_dir.previous.XXXXXX")" || return 1
-    if ! cp -p -- "$destination" "$previous_tmp" || ! cmp -s -- "$destination" "$previous_tmp"; then
-      rm -f -- "$previous_tmp" 2>/dev/null || true
-      return 1
-    fi
-  fi
-
-  state_tmp="$(mktemp "$STATE_DIR/.install_dir.XXXXXX")" || {
-    rm -f -- "$previous_tmp" 2>/dev/null || true
-    return 1
-  }
-  if ! printf '%s\n' "$INSTALL_DIR" > "$state_tmp"; then
-    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  fi
-  published_identity="$(stat -c '%d:%i' "$state_tmp" 2>/dev/null)" || {
-    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  }
-
-  validate_regular_publish_destination "$destination" "installation-state" || {
-    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  }
-  if ! mv -fT -- "$state_tmp" "$destination"; then
-    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+  state_tmp="$(mktemp "$STATE_DIR/.install_dir.publish.XXXXXX")" || return 1
+  if ! printf '%s
+' "$INSTALL_DIR" > "$state_tmp"; then
+    rm -f -- "$state_tmp" 2>/dev/null || true
     return 1
   fi
 
-  if [[ -e "$state_tmp" || -L "$state_tmp" ]]; then
-    rm -f -- "$state_tmp" "$previous_tmp" 2>/dev/null || true
+  if ! publish_regular_file_transactional "$state_tmp" "$destination" "installation-state"; then
+    [[ ! -e "$state_tmp" && ! -L "$state_tmp" ]] || rm -f -- "$state_tmp" 2>/dev/null || true
     return 1
   fi
-
-  if [[ ! -f "$destination" || -L "$destination" ]] \
-    || ! cmp -s -- "$destination" <(printf '%s\n' "$INSTALL_DIR"); then
-    local current_identity=""
-    if [[ -f "$destination" && ! -L "$destination" ]]; then
-      current_identity="$(stat -c '%d:%i' "$destination" 2>/dev/null || true)"
-    fi
-
-    if [[ -n "$previous_tmp" ]]; then
-      if [[ -e "$destination" || -L "$destination" ]]; then
-        [[ -f "$destination" && ! -L "$destination" && "$current_identity" == "$published_identity" ]] || {
-          err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
-          return 1
-        }
-      fi
-
-      local restore_tmp
-      restore_tmp="$(mktemp "$STATE_DIR/.install_dir.restore.XXXXXX")" || {
-        err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
-        return 1
-      }
-      if ! cp -p -- "$previous_tmp" "$restore_tmp" \
-        || ! mv -fT -- "$restore_tmp" "$destination" \
-        || [[ -e "$restore_tmp" || -L "$restore_tmp" ]] \
-        || [[ ! -f "$destination" || -L "$destination" ]] \
-        || ! cmp -s -- "$destination" "$previous_tmp"; then
-        rm -f -- "$restore_tmp" 2>/dev/null || true
-        err "Installation-state publication failed postcondition verification; previous state is preserved at: $previous_tmp"
-        return 1
-      fi
-      rm -f -- "$previous_tmp"
-      previous_tmp=""
-    else
-      if [[ -e "$destination" || -L "$destination" ]]; then
-        [[ -f "$destination" && ! -L "$destination" && "$current_identity" == "$published_identity" ]] || return 1
-        rm -f -- "$destination" || return 1
-      fi
-    fi
-    return 1
-  fi
-
-  rm -f -- "$previous_tmp" 2>/dev/null || true
+  [[ -f "$destination" && ! -L "$destination" ]] \
+    && cmp -s -- "$destination" <(printf '%s
+' "$INSTALL_DIR")
 }
 
 move_owned_install_dir() {
@@ -894,17 +1050,54 @@ move_owned_install_dir() {
   installation_is_sso_owned "$source" || return 1
   [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
 
-  mv -T -- "$source" "$destination" || return 1
+  atomic_move_noreplace "$source" "$destination" || return 1
   [[ ! -e "$source" && ! -L "$source" ]] || return 1
   installation_is_sso_owned "$destination"
 }
 
-remove_owned_install_dir() {
-  local path="$1"
-  installation_is_sso_owned "$path" || return 1
-  rm -rf -- "$path" || return 1
-  [[ ! -e "$path" && ! -L "$path" ]]
+replace_owned_install_dir() {
+  local source="$1" destination="$2" previous_identity displaced=""
+  installation_is_sso_owned "$source" || return 1
+
+  if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+    move_owned_install_dir "$source" "$destination"
+    return
+  fi
+
+  installation_is_sso_owned "$destination" || return 1
+  previous_identity="$(path_identity "$destination")" || return 1
+  displaced="$(make_absent_sibling_path "${destination}.displaced")" || return 1
+  if ! atomic_displace_expected_path "$destination" "$displaced" "$previous_identity"; then
+    return 1
+  fi
+  installation_is_sso_owned "$displaced" || return 1
+
+  if ! move_owned_install_dir "$source" "$destination"; then
+    if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+      restore_displaced_path "$displaced" "$destination" "$previous_identity" >/dev/null 2>&1 || true
+    fi
+    return 1
+  fi
+
+  if ! remove_owned_install_dir "$displaced"; then
+    warn "Previous backup evidence could not be cleaned safely and remains at: $displaced"
+  fi
 }
+
+remove_owned_install_dir() {
+  local path="$1" expected_identity evidence=""
+  installation_is_sso_owned "$path" || return 1
+  expected_identity="$(path_identity "$path")" || return 1
+  evidence="$(make_absent_sibling_path "${path}.remove")" || return 1
+  if ! atomic_displace_expected_path "$path" "$evidence" "$expected_identity"; then
+    return 1
+  fi
+  installation_is_sso_owned "$evidence" || return 1
+  [[ "$(path_identity "$evidence" 2>/dev/null || true)" == "$expected_identity" ]] || return 1
+  rm -rf -- "$evidence" || return 1
+  [[ ! -e "$evidence" && ! -L "$evidence" ]]
+}
+
 
 rollback_install_activation() {
   local had_current="$1"
@@ -973,16 +1166,9 @@ install_staged_payload() {
   fi
 
   if [[ "$had_current" == "1" ]]; then
-    if [[ -e "$backup" || -L "$backup" ]]; then
-      if ! remove_owned_install_dir "$backup"; then
-        rm -rf -- "$new" 2>/dev/null || true
-        err "Could not safely rotate the previous installation backup."
-        return 1
-      fi
-    fi
-    if ! move_owned_install_dir "$INSTALL_DIR" "$backup"; then
+    if ! replace_owned_install_dir "$INSTALL_DIR" "$backup"; then
       rm -rf -- "$new" 2>/dev/null || true
-      err "Could not preserve the current installation."
+      err "Could not preserve the current installation transactionally."
       return 1
     fi
   fi
@@ -1070,102 +1256,27 @@ create_launcher() {
   validate_runtime_paths || return 1
   [[ -f "$INSTALL_DIR/sso.sh" && ! -L "$INSTALL_DIR/sso.sh" ]] || return 1
 
-  local launcher_dir launcher_tmp="" previous_tmp="" published_identity=""
+  local launcher_dir launcher_tmp
   launcher_dir="$(dirname "$LAUNCHER_PATH")"
   mkdir -p "$launcher_dir" || return 1
 
   if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
     launcher_is_sso_owned "$LAUNCHER_PATH" || return 1
-    previous_tmp="$(mktemp "${LAUNCHER_PATH}.previous.XXXXXX")" || return 1
-    if ! cp -p -- "$LAUNCHER_PATH" "$previous_tmp" || ! cmp -s -- "$LAUNCHER_PATH" "$previous_tmp"; then
-      rm -f -- "$previous_tmp" 2>/dev/null || true
-      return 1
-    fi
   fi
 
-  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.tmp.XXXXXX")" || {
-    rm -f -- "$previous_tmp" 2>/dev/null || true
-    return 1
-  }
-
+  launcher_tmp="$(mktemp "${LAUNCHER_PATH}.publish.XXXXXX")" || return 1
   if ! render_current_launcher > "$launcher_tmp" || ! chmod 0755 "$launcher_tmp"; then
-    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  fi
-  published_identity="$(stat -c '%d:%i' "$launcher_tmp" 2>/dev/null)" || {
-    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  }
-
-  if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
-    launcher_is_sso_owned "$LAUNCHER_PATH" || {
-      rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
-      return 1
-    }
-  fi
-
-  if ! mv -fT -- "$launcher_tmp" "$LAUNCHER_PATH"; then
-    rm -f -- "$launcher_tmp" "$previous_tmp" 2>/dev/null || true
-    return 1
-  fi
-
-  if [[ -e "$launcher_tmp" || -L "$launcher_tmp" ]]; then
     rm -f -- "$launcher_tmp" 2>/dev/null || true
-    if [[ -n "$previous_tmp" ]]; then
-      if [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" ]] \
-        && cmp -s -- "$LAUNCHER_PATH" "$previous_tmp"; then
-        rm -f -- "$previous_tmp"
-      else
-        err "Launcher publication reported success without consuming its staging file; previous launcher is preserved at: $previous_tmp"
-      fi
-    elif [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
-      return 1
-    fi
     return 1
   fi
 
-  if ! launcher_is_current_sso_owned "$LAUNCHER_PATH" \
-    || [[ "$(stat -c %a "$LAUNCHER_PATH" 2>/dev/null)" != "755" ]]; then
-    local current_identity=""
-    if [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" ]]; then
-      current_identity="$(stat -c '%d:%i' "$LAUNCHER_PATH" 2>/dev/null || true)"
-    fi
-
-    if [[ -n "$previous_tmp" ]]; then
-      if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
-        [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" && "$current_identity" == "$published_identity" ]] || {
-          err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
-          return 1
-        }
-      fi
-
-      local restore_tmp
-      restore_tmp="$(mktemp "${LAUNCHER_PATH}.restore.XXXXXX")" || {
-        err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
-        return 1
-      }
-      if ! cp -p -- "$previous_tmp" "$restore_tmp" \
-        || ! mv -fT -- "$restore_tmp" "$LAUNCHER_PATH" \
-        || [[ -e "$restore_tmp" || -L "$restore_tmp" ]] \
-        || [[ ! -f "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]] \
-        || ! cmp -s -- "$LAUNCHER_PATH" "$previous_tmp" \
-        || ! launcher_is_sso_owned "$LAUNCHER_PATH"; then
-        rm -f -- "$restore_tmp" 2>/dev/null || true
-        err "Launcher publication failed postcondition verification; previous launcher is preserved at: $previous_tmp"
-        return 1
-      fi
-      rm -f -- "$previous_tmp"
-      previous_tmp=""
-    else
-      if [[ -e "$LAUNCHER_PATH" || -L "$LAUNCHER_PATH" ]]; then
-        [[ -f "$LAUNCHER_PATH" && ! -L "$LAUNCHER_PATH" && "$current_identity" == "$published_identity" ]] || return 1
-        rm -f -- "$LAUNCHER_PATH" || return 1
-      fi
-    fi
+  if ! publish_regular_file_transactional "$launcher_tmp" "$LAUNCHER_PATH" "launcher"; then
+    [[ ! -e "$launcher_tmp" && ! -L "$launcher_tmp" ]] || rm -f -- "$launcher_tmp" 2>/dev/null || true
     return 1
   fi
 
-  rm -f -- "$previous_tmp" 2>/dev/null || true
+  launcher_is_current_sso_owned "$LAUNCHER_PATH" \
+    && [[ "$(stat -c %a "$LAUNCHER_PATH" 2>/dev/null)" == "755" ]]
 }
 
 run_sso() {
