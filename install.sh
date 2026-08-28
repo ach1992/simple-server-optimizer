@@ -177,6 +177,15 @@ install_payload() {
 
 install_local() {
   info "Installing from local payload: $SOURCE_DIR"
+
+  if [[ "$SOURCE_DIR" == "$INSTALL_DIR" ]]; then
+    validate_payload "$SOURCE_DIR" || return 1
+    chmod 755 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/sso.sh" || return 1
+    write_install_state || return 1
+    create_launcher || return 1
+    return 0
+  fi
+
   install_payload "$SOURCE_DIR"
 }
 
