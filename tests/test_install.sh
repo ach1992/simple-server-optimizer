@@ -46,6 +46,20 @@ test_local_install_uses_source_and_first_install_has_no_backup() {
   rm -rf "$t"
 }
 
+test_local_payload_already_at_install_path_is_not_backed_up() {
+  local t
+  t="$(mktemp -d)" || return 1
+  configure_temp_paths "$t" || return 1
+  make_payload "$INSTALL_DIR" || return 1
+  SOURCE_DIR="$INSTALL_DIR"
+
+  install_local || return 1
+  [[ -f "$INSTALL_DIR/sso.sh" ]] || return 1
+  [[ ! -e "$INSTALL_DIR.bak" ]] || return 1
+  [[ "$(cat "$STATE_DIR/install_dir")" == "$INSTALL_DIR" ]] || return 1
+  rm -rf "$t"
+}
+
 test_update_keeps_one_previous_install() {
   local t
   t="$(mktemp -d)" || return 1
@@ -128,6 +142,7 @@ test_update_menu_uses_installed_installer_explicitly() {
 }
 
 run_test "local install uses source directory and first install has no backup" test_local_install_uses_source_and_first_install_has_no_backup
+run_test "local payload already at install path is adopted without backup" test_local_payload_already_at_install_path_is_not_backed_up
 run_test "explicit update keeps one previous install" test_update_keeps_one_previous_install
 run_test "incomplete payload leaves existing install untouched" test_incomplete_payload_does_not_touch_existing_install
 run_test "online mode downloads then installs through the same simple path" test_online_download_uses_explicit_online_path
