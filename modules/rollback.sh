@@ -1313,7 +1313,7 @@ module_rollback_choose() {
     pause; return
   fi
   echo "$list" | nl -w2 -s') '
-  echo "0) Back"
+  menu_secondary "0) Back"
   local idx=""
   prompt_choice "Select number" idx
   [[ "$idx" == "0" ]] && return

@@ -19,9 +19,14 @@ warn()  { say "${c_ylw}[!]${c_reset} $*"; }
 err()   { say "${c_red}[x]${c_reset} $*"; }
 title() { say "${c_bold}${c_mag}$*${c_reset}"; }
 muted() { say "${c_dim}$*${c_reset}"; }
+menu_item() { say "${c_cyn}$*${c_reset}"; }
+menu_warn() { say "${c_bold}${c_ylw}$*${c_reset}"; }
+menu_secondary() { muted "$*"; }
+status_active() { say "${c_grn}$*${c_reset}"; }
+status_inactive() { muted "$*"; }
 
 line() { say "${c_dim}------------------------------------------------------------${c_reset}"; }
-section() { say "${c_bold}$*${c_reset}"; line; }
+section() { say "${c_bold}${c_mag}$*${c_reset}"; line; }
 
 # Read from TTY even if script is started via pipe (e.g. curl | bash).
 # If neither the TTY nor stdin can provide input, return failure instead of
