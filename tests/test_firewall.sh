@@ -15,6 +15,17 @@ setup_firewall_test() {
   source "$ROOT_DIR/modules/firewall.sh"
 }
 
+test_repository_lists_are_valid() (
+  local t
+  t="$(mktemp -d)" || return 1
+  setup_firewall_test "$t"
+
+  normalize_iplist_source "$ROOT_DIR/assets/blocklist-ip.ipv4" "$t/blocklist" "Repository blocklist" >/dev/null || return 1
+  normalize_iplist_source "$ROOT_DIR/assets/whitelist-default.ipv4" "$t/whitelist" "Repository whitelist" >/dev/null || return 1
+  [[ -s "$t/blocklist" ]] || return 1
+  [[ -s "$t/whitelist" ]] || return 1
+)
+
 test_invalid_state_is_rejected_before_apply() (
   local t
   t="$(mktemp -d)" || return 1
@@ -45,6 +56,27 @@ test_nft_backend_failure_propagates() (
   }
 
   if nft_apply >/dev/null 2>&1; then
+    return 1
+  fi
+)
+
+test_ipset_restore_failure_propagates() (
+  local t
+  t="$(mktemp -d)" || return 1
+  setup_firewall_test "$t"
+  printf '1.2.3.4\n' > "$STATE_BLOCKLIST"
+
+  ipset() {
+    case "$1" in
+      list) return 1 ;;
+      create|flush) return 0 ;;
+      restore) cat >/dev/null; return 7 ;;
+      *) return 0 ;;
+    esac
+  }
+  iptables() { return 0; }
+
+  if ipset_apply >/dev/null 2>&1; then
     return 1
   fi
 )
@@ -165,8 +197,10 @@ test_nft_reapply_replaces_existing_sso_table() (
   [[ "$(grep -c '^delete table inet sso$' "$log")" -eq 1 ]] || return 1
 )
 
+run_test "repository firewall lists contain valid IPv4/CIDR entries" test_repository_lists_are_valid
 run_test "invalid stored firewall entries are rejected before apply" test_invalid_state_is_rejected_before_apply
 run_test "nft backend failures propagate instead of false-success" test_nft_backend_failure_propagates
+run_test "ipset restore failures propagate instead of false-success" test_ipset_restore_failure_propagates
 run_test "nft blocklist loading uses one batch element call" test_nft_blocklist_uses_one_batch_call
 run_test "active nft blacklist add persists and applies immediately" test_active_nft_add_is_immediate_and_persisted
 run_test "runtime update failure restores the persisted list" test_runtime_failure_restores_persisted_list
