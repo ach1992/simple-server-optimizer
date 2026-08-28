@@ -180,7 +180,163 @@ owned_fail2ban_must_be_inactive_after_stop_before_purge() {
   return "$rc"
 }
 
+owned_fail2ban_unexpected_load_state_blocks_purge() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_fixture "$tmp"
+
+  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
+    set -Eeuo pipefail
+    STATE_DIR="$FIXTURE_ROOT/state"; BACKUP_DIR_BASE="$FIXTURE_ROOT/backups"; SSO_DIR="$FIXTURE_ROOT/install"
+    SSO_SYSTEMD_DIR="$FIXTURE_ROOT/systemd"; SSO_SYSCTL_DIR="$FIXTURE_ROOT/sysctl"; SSO_MODULES_LOAD_DIR="$FIXTURE_ROOT/modules-load"
+    SSO_LOCAL_SBIN_DIR="$FIXTURE_ROOT/sbin"; SSO_LOCAL_BIN_DIR="$FIXTURE_ROOT/bin"
+    F2B_SSO_LOCAL="$FIXTURE_ROOT/fail2ban/jail.d/sso.local"; F2B_NGINX_MARKER="$STATE_DIR/fail2ban-nginx.enabled"
+    source "$ROOT_DIR/modules/utils.sh"; source "$ROOT_DIR/modules/rollback.sh"; source "$ROOT_DIR/modules/uninstall.sh"
+    header(){ :; }; section(){ :; }; info(){ :; }; warn(){ :; }; err(){ :; }; pause(){ :; }
+    read_input(){ local -n out="$2"; out="y"; }
+    backup_migrate_ownership_baselines(){ return 0; }
+    backup_resource_baseline_dir(){ return 1; }
+    uninstall_disable_sso_service(){ return 0; }
+    remove_sso_firewall_runtime(){ return 0; }
+    uninstall_cpu_runtime_owned(){ return 1; }
+    systemd_load_state(){ [[ "$1" == "fail2ban.service" ]] && printf "error\n" || printf "not-found\n"; }
+    systemctl() {
+      printf "systemctl %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"
+      [[ "$1" == "is-active" ]] && { printf "inactive\n"; return 3; }
+      return 0
+    }
+    apt-get(){ printf "apt-get %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"; return 0; }
+    run_step(){ local msg="$1"; shift; "$@"; }
+    module_uninstall
+  ' >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  if grep -q '^apt-get purge -y fail2ban$' "$tmp/commands.log"; then rc=1; fi
+  [[ -f "$tmp/state/installed_fail2ban.marker" ]] || rc=1
+  [[ -d "$tmp/backups" ]] || rc=1
+  [[ -f "$tmp/install/sso.sh" ]] || rc=1
+  [[ -f "$tmp/bin/sso" ]] || rc=1
+  [[ -f "$tmp/fail2ban/jail.d/sso.local" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+owned_fail2ban_loaded_ambiguous_active_state_blocks_purge() {
+  local active_state tmp rc=0
+
+  for active_state in unknown not-found; do
+    tmp="$(mktemp -d)" || return 1
+    make_fixture "$tmp"
+
+    ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" AMBIGUOUS_ACTIVE="$active_state" bash -c '
+      set -Eeuo pipefail
+      STATE_DIR="$FIXTURE_ROOT/state"; BACKUP_DIR_BASE="$FIXTURE_ROOT/backups"; SSO_DIR="$FIXTURE_ROOT/install"
+      SSO_SYSTEMD_DIR="$FIXTURE_ROOT/systemd"; SSO_SYSCTL_DIR="$FIXTURE_ROOT/sysctl"; SSO_MODULES_LOAD_DIR="$FIXTURE_ROOT/modules-load"
+      SSO_LOCAL_SBIN_DIR="$FIXTURE_ROOT/sbin"; SSO_LOCAL_BIN_DIR="$FIXTURE_ROOT/bin"
+      F2B_SSO_LOCAL="$FIXTURE_ROOT/fail2ban/jail.d/sso.local"; F2B_NGINX_MARKER="$STATE_DIR/fail2ban-nginx.enabled"
+      source "$ROOT_DIR/modules/utils.sh"; source "$ROOT_DIR/modules/rollback.sh"; source "$ROOT_DIR/modules/uninstall.sh"
+      header(){ :; }; section(){ :; }; info(){ :; }; warn(){ :; }; err(){ :; }; pause(){ :; }
+      read_input(){ local -n out="$2"; out="y"; }
+      backup_migrate_ownership_baselines(){ return 0; }
+      backup_resource_baseline_dir(){ return 1; }
+      uninstall_disable_sso_service(){ return 0; }
+      remove_sso_firewall_runtime(){ return 0; }
+      uninstall_cpu_runtime_owned(){ return 1; }
+      systemd_load_state(){ [[ "$1" == "fail2ban.service" ]] && printf "loaded\n" || printf "not-found\n"; }
+      systemctl() {
+        printf "systemctl %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"
+        [[ "$1" == "is-active" ]] && { printf "%s\n" "$AMBIGUOUS_ACTIVE"; return 4; }
+        return 0
+      }
+      apt-get(){ printf "apt-get %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"; return 0; }
+      run_step(){ local msg="$1"; shift; "$@"; }
+      module_uninstall
+    ' >/dev/null 2>&1 || rc=1
+
+    if grep -q '^apt-get purge -y fail2ban$' "$tmp/commands.log"; then rc=1; fi
+    [[ -f "$tmp/state/installed_fail2ban.marker" ]] || rc=1
+    [[ -d "$tmp/backups" ]] || rc=1
+    [[ -f "$tmp/install/sso.sh" ]] || rc=1
+    [[ -f "$tmp/bin/sso" ]] || rc=1
+    [[ -f "$tmp/fail2ban/jail.d/sso.local" ]] || rc=1
+    rm -rf "$tmp"
+  done
+
+  return "$rc"
+}
+
+owned_fail2ban_ambiguous_post_purge_preserves_recovery() {
+  local post_tuple post_load post_active tmp rc=0
+
+  for post_tuple in "error unknown" "not-found active"; do
+    read -r post_load post_active <<<"$post_tuple"
+    tmp="$(mktemp -d)" || return 1
+    make_fixture "$tmp"
+
+    ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" POST_LOAD="$post_load" POST_ACTIVE="$post_active" bash -c '
+      set -Eeuo pipefail
+      STATE_DIR="$FIXTURE_ROOT/state"; BACKUP_DIR_BASE="$FIXTURE_ROOT/backups"; SSO_DIR="$FIXTURE_ROOT/install"
+      SSO_SYSTEMD_DIR="$FIXTURE_ROOT/systemd"; SSO_SYSCTL_DIR="$FIXTURE_ROOT/sysctl"; SSO_MODULES_LOAD_DIR="$FIXTURE_ROOT/modules-load"
+      SSO_LOCAL_SBIN_DIR="$FIXTURE_ROOT/sbin"; SSO_LOCAL_BIN_DIR="$FIXTURE_ROOT/bin"
+      F2B_SSO_LOCAL="$FIXTURE_ROOT/fail2ban/jail.d/sso.local"; F2B_NGINX_MARKER="$STATE_DIR/fail2ban-nginx.enabled"
+      source "$ROOT_DIR/modules/utils.sh"; source "$ROOT_DIR/modules/rollback.sh"; source "$ROOT_DIR/modules/uninstall.sh"
+      header(){ :; }; section(){ :; }; info(){ :; }; warn(){ :; }; err(){ :; }; pause(){ :; }
+      read_input(){ local -n out="$2"; out="y"; }
+      backup_migrate_ownership_baselines(){ return 0; }
+      backup_resource_baseline_dir(){ return 1; }
+      uninstall_disable_sso_service(){ return 0; }
+      remove_sso_firewall_runtime(){ return 0; }
+      uninstall_cpu_runtime_owned(){ return 1; }
+
+      ACTIVE=1
+      PURGED=0
+      systemd_load_state() {
+        if [[ "$1" != "fail2ban.service" ]]; then printf "not-found\n"; return 0; fi
+        if (( PURGED )); then printf "%s\n" "$POST_LOAD"; else printf "loaded\n"; fi
+      }
+      systemctl() {
+        printf "systemctl %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"
+        case "$1" in
+          is-active)
+            if (( PURGED )); then printf "%s\n" "$POST_ACTIVE"; return 4; fi
+            if (( ACTIVE )); then printf "active\n"; return 0; fi
+            printf "inactive\n"; return 3
+            ;;
+          stop)
+            ACTIVE=0
+            return 0
+            ;;
+          *) return 0 ;;
+        esac
+      }
+      apt-get() {
+        printf "apt-get %s\n" "$*" >> "$FIXTURE_ROOT/commands.log"
+        [[ "$*" == "purge -y fail2ban" ]] || return 1
+        (( ACTIVE == 0 )) || return 1
+        PURGED=1
+        return 0
+      }
+      run_step(){ local msg="$1"; shift; "$@"; }
+      module_uninstall
+    ' >/dev/null 2>&1 || rc=1
+
+    grep -q '^systemctl stop fail2ban.service$' "$tmp/commands.log" || rc=1
+    grep -q '^apt-get purge -y fail2ban$' "$tmp/commands.log" || rc=1
+    [[ -f "$tmp/state/installed_fail2ban.marker" ]] || rc=1
+    [[ -d "$tmp/backups" ]] || rc=1
+    [[ -f "$tmp/install/sso.sh" ]] || rc=1
+    [[ -f "$tmp/bin/sso" ]] || rc=1
+    [[ -f "$tmp/fail2ban/jail.d/sso.local" ]] || rc=1
+    rm -rf "$tmp"
+  done
+
+  return "$rc"
+}
+
 run_test "SSO-owned Fail2Ban is stopped before purge and full uninstall completes" owned_fail2ban_stops_before_purge_and_uninstall_finishes
 run_test "Fail2Ban stop failure aborts before purge and preserves recovery evidence" owned_fail2ban_stop_failure_aborts_before_purge
 run_test "Fail2Ban must verify inactive after stop before purge" owned_fail2ban_must_be_inactive_after_stop_before_purge
+run_test "unexpected Fail2Ban LoadState blocks purge and preserves recovery evidence" owned_fail2ban_unexpected_load_state_blocks_purge
+run_test "loaded Fail2Ban with unknown/not-found active state blocks purge" owned_fail2ban_loaded_ambiguous_active_state_blocks_purge
+run_test "ambiguous or stale post-purge Fail2Ban lifecycle preserves recovery evidence" owned_fail2ban_ambiguous_post_purge_preserves_recovery
 finish_tests
