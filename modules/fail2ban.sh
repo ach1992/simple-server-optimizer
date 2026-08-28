@@ -5,6 +5,8 @@ F2B_DIR="${F2B_DIR:-/etc/fail2ban}"
 F2B_JAIL_DIR="${F2B_JAIL_DIR:-$F2B_DIR/jail.d}"
 F2B_SSO_LOCAL="${F2B_SSO_LOCAL:-$F2B_JAIL_DIR/sso.local}"
 F2B_NGINX_MARKER="${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}"
+F2B_AUTH_LOG="${F2B_AUTH_LOG:-/var/log/auth.log}"
+F2B_SECURE_LOG="${F2B_SECURE_LOG:-/var/log/secure}"
 
 detect_nginx() {
   command -v nginx >/dev/null 2>&1 || systemctl is-enabled nginx >/dev/null 2>&1
@@ -51,6 +53,16 @@ fail2ban_collect_whitelist_ips() {
   ' "$STATE_WHITELIST"
 }
 
+# Debian/Ubuntu minimal images may use journald without creating auth.log.
+# Fail2Ban's packaged sshd jail can then be enabled while its default file
+# backend has no log file to read. Override only that backend choice when no
+# traditional SSH auth log exists and journalctl is available; configuration
+# validation remains the final authority on whether the host supports it.
+fail2ban_sshd_use_systemd_backend() {
+  [[ ! -e "$F2B_AUTH_LOG" && ! -e "$F2B_SECURE_LOG" ]] || return 1
+  cmd_exists journalctl
+}
+
 fail2ban_render_sso_config() {
   local target="$1"
   local enable_nginx="${2:-0}"
@@ -69,6 +81,9 @@ fail2ban_render_sso_config() {
     echo ""
     echo "[sshd]"
     echo "enabled = true"
+    if fail2ban_sshd_use_systemd_backend; then
+      echo "backend = systemd"
+    fi
 
     if [[ "$enable_nginx" == "1" ]]; then
       echo ""

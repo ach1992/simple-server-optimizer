@@ -27,7 +27,13 @@ if [[ "${1:-}" == "is-active" ]]; then
 fi
 exit 0
 MOCK
-  chmod +x "$dir/fail2ban-client" "$dir/systemctl"
+
+  cat > "$dir/journalctl" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+
+  chmod +x "$dir/fail2ban-client" "$dir/systemctl" "$dir/journalctl"
 }
 
 run_fail2ban_fixture() {
@@ -35,7 +41,7 @@ run_fail2ban_fixture() {
   local validate_rc="${2:-0}"
   local action="$3"
 
-  mkdir -p "$tmp/etc/fail2ban/jail.d" "$tmp/state" "$tmp/bin"
+  mkdir -p "$tmp/etc/fail2ban/jail.d" "$tmp/state" "$tmp/bin" "$tmp/var/log"
   : > "$tmp/commands.log"
   make_mock_bin "$tmp/bin" "$validate_rc"
 
@@ -43,6 +49,8 @@ run_fail2ban_fixture() {
   SSO_TEST_COMMAND_LOG="$tmp/commands.log" \
   ROOT_DIR="$ROOT_DIR" \
   FIXTURE_ROOT="$tmp" \
+  F2B_AUTH_LOG="$tmp/var/log/auth.log" \
+  F2B_SECURE_LOG="$tmp/var/log/secure" \
   ACTION="$action" \
   bash -c '
     set -Eeuo pipefail
@@ -103,6 +111,38 @@ test_whitelist_is_under_default_section() {
   ignore_line="$(grep -n '^ignoreip = 203.0.113.10 198.51.100.0/24$' "$file" | cut -d: -f1)"
   local rc=0
   [[ -n "$default_line" && -n "$ignore_line" && "$ignore_line" -gt "$default_line" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_missing_auth_logs_use_systemd_backend() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+
+  if ! run_fail2ban_fixture "$tmp" 0 write >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  local rc=0
+  grep -qx 'backend = systemd' "$tmp/etc/fail2ban/jail.d/sso.local" || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_existing_auth_log_keeps_default_backend() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  mkdir -p "$tmp/var/log"
+  : > "$tmp/var/log/auth.log"
+
+  if ! run_fail2ban_fixture "$tmp" 0 write >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  local rc=0
+  if grep -qx 'backend = systemd' "$tmp/etc/fail2ban/jail.d/sso.local"; then rc=1; fi
   rm -rf "$tmp"
   return "$rc"
 }
@@ -270,6 +310,8 @@ test_disable_validation_failure_restores_sso_config() {
 
 run_test "Fail2Ban integration preserves operator jail.local" test_preserves_operator_jail_local
 run_test "whitelist ignoreip is rendered inside DEFAULT" test_whitelist_is_under_default_section
+run_test "missing SSH auth log selects the systemd backend" test_missing_auth_logs_use_systemd_backend
+run_test "existing SSH auth log keeps the default Fail2Ban backend" test_existing_auth_log_keeps_default_backend
 run_test "validation failure restores previous SSO config and skips systemctl" test_validation_failure_restores_previous_config_and_skips_service
 run_test "SSO Fail2Ban config rendering is idempotent" test_managed_config_is_idempotent
 run_test "nginx jail is an explicit managed section" test_nginx_section_is_explicit
