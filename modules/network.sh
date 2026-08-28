@@ -7,29 +7,65 @@ module_network_enable_fq_bbr() {
   local d
   d="$(backup_create "network:fq_bbr")"
 
-  # fq default
   tee /etc/sysctl.d/99-sso-qdisc.conf >/dev/null <<'EOF'
 net.core.default_qdisc=fq
 EOF
 
-  # try enable bbr if available
-  run_step "Loading tcp_bbr kernel module" modprobe tcp_bbr || warn "Could not load tcp_bbr (may already be built-in or unavailable)."
-  echo tcp_bbr > /etc/modules-load.d/bbr.conf
+  run_step "Loading tcp_bbr kernel module" modprobe tcp_bbr || warn "Could not load tcp_bbr (it may be built-in or unavailable)."
 
-  local avail
+  local avail bbr_available=0 persistence_warning=0
   avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
   if echo "$avail" | grep -qw bbr; then
+    bbr_available=1
+
+    # This legacy shared file may already contain operator entries. Preserve
+    # those entries and add tcp_bbr only when needed instead of overwriting it.
+    if [[ -e /etc/modules-load.d/bbr.conf || -L /etc/modules-load.d/bbr.conf ]]; then
+      if [[ -f /etc/modules-load.d/bbr.conf && ! -L /etc/modules-load.d/bbr.conf ]]; then
+        if ! grep -qxF 'tcp_bbr' /etc/modules-load.d/bbr.conf 2>/dev/null; then
+          printf '%s\n' 'tcp_bbr' >> /etc/modules-load.d/bbr.conf || persistence_warning=1
+        fi
+      else
+        warn "/etc/modules-load.d/bbr.conf is not a normal file; leaving it unchanged."
+        persistence_warning=1
+      fi
+    else
+      printf '%s\n' 'tcp_bbr' > /etc/modules-load.d/bbr.conf || persistence_warning=1
+    fi
+
     tee /etc/sysctl.d/99-sso-bbr.conf >/dev/null <<'EOF'
 net.ipv4.tcp_congestion_control=bbr
 EOF
-    ok "BBR enabled."
+    info "BBR is available; configuration was prepared."
   else
-    warn "BBR not available on this kernel. Keeping default congestion control."
+    warn "BBR is not available on this kernel. Keeping the current congestion control."
     rm -f /etc/sysctl.d/99-sso-bbr.conf 2>/dev/null || true
   fi
 
-  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
-  ok "Applied. (Backup: $d)"
+  local apply_failed=0
+  if ! run_step "Applying sysctl settings" sysctl --system; then
+    apply_failed=1
+    warn "sysctl reported errors; some runtime settings may not have been applied."
+  fi
+
+  local current_cc
+  current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "n/a")"
+  if [[ "$bbr_available" -eq 1 && "$current_cc" == "bbr" ]]; then
+    ok "BBR is active."
+  elif [[ "$bbr_available" -eq 1 ]]; then
+    warn "BBR is available but is not active (current: $current_cc)."
+    apply_failed=1
+  fi
+
+  if [[ "$persistence_warning" -eq 1 ]]; then
+    warn "BBR module-load persistence could not be fully prepared; current runtime may still work."
+  fi
+
+  if [[ "$apply_failed" -eq 0 && "$persistence_warning" -eq 0 ]]; then
+    ok "Network settings applied. (Backup: $d)"
+  else
+    warn "Network configuration finished with warnings. Review the status below. (Backup: $d)"
+  fi
   module_network_show
 }
 
@@ -57,8 +93,11 @@ net.ipv4.tcp_keepalive_probes=5
 net.ipv4.ip_local_port_range=10240 65535
 EOF
 
-  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
-  ok "Applied safe TCP sysctl. (Backup: $d)"
+  if run_step "Applying sysctl settings" sysctl --system; then
+    ok "TCP tuning applied. (Backup: $d)"
+  else
+    warn "TCP tuning file was saved, but sysctl reported errors; runtime application may be partial. (Backup: $d)"
+  fi
   module_network_show
 }
 
