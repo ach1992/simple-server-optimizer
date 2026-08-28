@@ -1,10 +1,10 @@
 # Architecture and Safety Boundaries
 
-This document owns the stable implementation boundaries for Simple Server Optimizer (SSO). Current work and priorities live in GitHub Issues; user-facing behavior lives in `README.md`.
+This document defines the stable implementation boundaries for Simple Server Optimizer (SSO). Current work and priorities live in GitHub Issues; user-facing behavior lives in `README.md`.
 
 ## 1. Product shape
 
-SSO is a small Bash-first toolkit for Debian/Ubuntu VPN/proxy nodes. The current application is interactive and module-driven:
+SSO is a small Bash-first toolkit:
 
 ```text
 install.sh
@@ -24,188 +24,132 @@ modules/
   rollback.sh
   uninstall.sh
 
-assets/
-  default lists/data
-
 /etc/sso/
-  persistent runtime state
+  persistent SSO state
 ```
 
-Keep this structure simple. Introduce a larger runtime or dependency only when its operational value materially exceeds its installation, security, maintenance, and recovery cost.
+Keep this structure simple. Do not introduce a larger runtime, framework, or transaction system unless a concrete operator problem requires it.
 
-## 2. Ownership model
+## 2. Ownership
 
-SSO must know what it owns and must not infer ownership merely because a path exists.
+SSO may manage clearly SSO-owned resources such as:
 
-### SSO-owned examples
-
-- `/etc/sso/*` runtime state created by SSO;
+- `/etc/sso/*`;
 - `/etc/sysctl.d/99-sso-*.conf`;
 - `/etc/systemd/system/sso-*.service`;
 - `/usr/local/sbin/sso-*-restore`;
 - `/usr/local/bin/sso`;
-- explicitly namespaced firewall tables/chains/sets such as `sso*`;
-- SSO-specific Fail2Ban drop-ins such as `/etc/fail2ban/jail.d/sso.local`;
-- SSO backup/manifest data.
+- SSO-namespaced firewall objects;
+- SSO Fail2Ban drop-ins;
+- SSO backups.
 
-### Operator-owned examples
-
-SSO must not claim ownership of these merely because it needs to interoperate with them:
+SSO must preserve unrelated operator resources such as:
 
 - `/etc/fail2ban/jail.local`;
-- arbitrary `/etc/sysctl.conf` or non-SSO `/etc/sysctl.d/*` files;
-- unrelated nftables/iptables tables/chains/rules;
+- unrelated sysctl files;
+- unrelated firewall tables/chains/rules;
 - unrelated systemd units;
-- VPN/proxy service configuration owned by WireGuard/OpenVPN/Xray/Hysteria/TUIC or a control panel.
+- VPN/proxy service configuration.
 
-Prefer drop-ins, namespaced resources, and explicit state over editing shared configuration.
+Prefer explicit SSO-owned files and namespaced resources over editing shared configuration.
 
-## 3. State and mutation contract
+## 3. Mutation model
 
-Every persistent mutation should follow this model where practical:
+For normal features, use the simplest flow that keeps behavior honest:
 
 ```text
-DISCOVER CURRENT STATE
-  -> VALIDATE INPUT / PRECONDITIONS
-  -> CAPTURE PRIOR OWNED STATE
-  -> PREPARE NEW STATE
-  -> VALIDATE PREPARED STATE
-  -> APPLY ATOMICALLY OR IN A BOUNDED ORDER
-  -> VERIFY EFFECTIVE STATE
-  -> RECORD SSO STATE/MANIFEST
+CHECK INPUT / CURRENT STATE
+  -> PREPARE THE REQUESTED CHANGE
+  -> APPLY
+  -> VERIFY ENOUGH TO KNOW SUCCESS OR FAILURE
+  -> RECORD SSO STATE WHEN NEEDED
 ```
 
-A partial failure is not success. Error suppression such as `|| true` is acceptable only when the failure is explicitly non-fatal and the caller still has enough evidence to determine the final result.
+Do not report complete success after a failed/partial apply.
+
+Use temp-file + rename, validation-before-apply, or backup-before-replace where those are simple and materially useful. Do not generalize every filesystem operation into a custom transaction/identity framework.
 
 ## 4. Backup, rollback, and uninstall
 
-A backup must distinguish at least:
+Backups should represent the prior SSO-relevant state well enough to restore or remove SSO-owned changes correctly.
 
-- an artifact existed and its content/metadata was captured;
-- an artifact did not exist before SSO changed the system;
-- a service existed/enabled/active state before SSO touched it;
-- SSO installed a package versus a package that already existed.
+Important distinctions include prior presence vs prior absence where restore behavior depends on it.
 
-Rollback should restore the SSO-relevant prior state, including absence when appropriate. It must not recreate a service/file merely because the current system still contains a newer SSO artifact.
+Rollback/uninstall must not delete unrelated operator state.
 
-Uninstall must remove every SSO-owned persistent artifact that the installed version created, while preserving unrelated operator state. A manifest-driven model is preferred as the surface grows.
+The implementation should remain understandable. A larger manifest/transaction model is optional future work only if the current product surface actually outgrows the simpler model.
 
-## 5. Firewall architecture
+## 5. Firewall
 
-### Current stabilization boundary
+For v1.1.0, keep current policy semantics and fix existing behavior only:
 
-For v1.1.0, preserve the current policy semantics while correcting validation, performance, partial-failure handling, and management UX.
+- validate block/allow input before apply;
+- reject invalid entries clearly;
+- do not report complete success after backend failure;
+- make add/remove update persisted state and the active backend in one operator action when possible;
+- keep SSO firewall objects namespaced;
+- use a simple backend batch path when it clearly avoids obvious per-entry overhead and does not add disproportionate complexity.
 
-Requirements:
+Do not add new FORWARD semantics, IPv6 feature surface, concurrency frameworks, counters/search, or broad firewall redesign to v1.1.0 without a separate accepted requirement.
 
-- validate every block/allow entry before runtime apply;
-- prefer one validated nftables batch/transaction over one `nft` process per entry;
-- for the legacy iptables/ipset backend, prefer bulk restore/swap patterns when supported;
-- never report a complete apply when entries were rejected;
-- add/remove operations should update persisted state and active runtime state in one operator action where safely possible;
-- serialize concurrent list mutations with a simple lock;
-- runtime verification should confirm the expected table/set/chain and relevant entry counts/content;
-- keep SSO resources explicitly namespaced.
+## 6. Fail2Ban
 
-### VPN-aware firewall boundary after v1.1.0
+SSO should manage its own drop-in under `jail.d` and preserve operator-owned `jail.local`.
 
-Do not assume only host `INPUT`/`OUTPUT` traffic matters. Routed VPN gateways require explicit `FORWARD` consideration; locally-originating proxies can require `OUTPUT` controls. Future firewall scopes must therefore be explicit and workload-aware.
+When validation tooling is available, validate the effective configuration before restart/reload.
 
-IPv4 and IPv6 must be modeled separately where address-family semantics require it, while using common `inet` nftables structures where appropriate.
+## 7. Network / CPU tuning
 
-### Safe management
+Do not present fixed tuning as universally optimal.
 
-Before high-impact rule replacement, SSO should have enough information to avoid accidental management lockout or clearly warn/cancel when it cannot establish safety. A future safe-apply watchdog/rollback mechanism may be used where it can be made reliable.
+v1.1.0 only fixes reproduced correctness/persistence defects in the current tuning features. Adaptive topology/workload-aware tuning is deferred until real use proves it is valuable.
 
-## 6. Fail2Ban boundary
+Any value applied interactively and persisted for reboot should come from the same intended configuration so reboot does not silently change behavior.
 
-SSO should manage its own drop-in under `jail.d`, not replace `jail.local`.
+## 8. Installer and update
 
-Before restarting/reloading Fail2Ban after an SSO change:
+Keep install/update behavior simple:
 
-1. render/write only the SSO-owned configuration;
-2. validate configuration using the installed Fail2Ban tooling;
-3. abort without restarting on validation failure;
-4. restart/reload only after validation succeeds;
-5. verify service/jail state relevant to the requested operation.
+- local/offline install uses the directory that actually contains `install.sh`;
+- first install does not create a meaningless backup;
+- normal `sso` launch runs installed files only;
+- update/reinstall is explicit;
+- explicit update validates the small required payload before replacement;
+- keep one straightforward previous-install fallback during replacement;
+- launcher behavior remains obvious;
+- published versions may use a straightforward versioned GitHub release/tag path.
 
-## 7. Network tuning model
+For v1.1.0, the architecture does **not** require:
 
-SSO is primarily for VPN/proxy nodes, so tuning must be workload-aware.
+- a custom atomic publication subsystem;
+- inode-identity/race protocols for temporary paths;
+- runtime GitHub tag/ref object parsing;
+- a bespoke release-manifest or cryptographic trust engine;
+- mandatory immutable-release platform enforcement.
 
-### TCP-oriented concerns
+Those may be considered only if a future accepted requirement demonstrates that the extra complexity is worth it.
 
-Examples include congestion control, qdisc, listen/backlog capacity, local ephemeral ports, and connection lifecycle. These settings should not be presented as universally beneficial to all VPN traffic.
+## 9. Concurrency and filesystem behavior
 
-### UDP/routed VPN concerns
+Use ordinary shell-safe patterns where practical:
 
-Examples include:
+- unique temp files/directories;
+- temp-file + rename for simple state/config writes;
+- simple locking only where a real concurrent-write problem is demonstrated;
+- unique backup names;
+- machine-readable helper output separated from UI output.
 
-- MTU/PMTU and MSS interaction;
-- socket receive/send buffers;
-- IPv4/IPv6 forwarding;
-- conntrack capacity/pressure where applicable;
-- queueing and packet drops;
-- NIC queue topology and virtualization;
-- forwarded traffic rather than only local sockets.
+Do not build global concurrency/transaction infrastructure without evidence that normal single-operator use needs it.
 
-### RPS/RFS/XPS/IRQ
+## 10. Testing
 
-Do not apply a fixed all-CPU mask merely because CPUs exist. The correct policy can depend on RSS, RX/TX queue count, CPU topology, IRQ distribution, NIC driver, and virtualization. If tuning cannot be justified from detected state, prefer no change plus a diagnostic recommendation.
+Development tests must not mutate the shared AI Server Agent host's real firewall, sysctl, systemd, Fail2Ban, package database, or networking.
 
-Any value applied interactively and persisted for reboot must come from the same source of truth so reboot cannot silently change the intended setting.
+Use, as needed:
 
-## 8. VPN Doctor direction
+1. pure Bash/helper tests;
+2. temporary-root/mocked-command tests;
+3. isolated disposable integration only when a current behavior genuinely requires it;
+4. owner validation on a real VPN/proxy server after release.
 
-A later read-only `VPN Doctor` should diagnose before tuning. Useful evidence may include:
-
-- OS/kernel/virtualization;
-- CPU and NIC queue topology;
-- detected WAN/VPN interfaces;
-- forwarding state;
-- MTU/PMTU indicators;
-- conntrack usage;
-- TCP congestion control/qdisc;
-- UDP/TCP buffer limits;
-- packet/softnet drop signals;
-- firewall backend and INPUT/OUTPUT/FORWARD coverage;
-- block/allow list health.
-
-Read-only diagnostics should be separable from mutation so operators can inspect a server without applying changes.
-
-## 9. Installer and update trust boundary
-
-SSO is executed as root. Online install/update therefore has a high-impact supply-chain surface.
-
-Release installation should be based on an immutable release/tag/artifact and verified integrity metadata. Downloading mutable `main` content with only “file is non-empty / has a shebang” validation is not an acceptable long-term release trust model.
-
-Installation/update should stage content before replacing the live installation and should preserve a known-good previous installation until the new payload passes integrity and structural validation.
-
-Local/offline installation must use the actual directory containing the installer payload rather than assuming the payload already exists at the final install path.
-
-## 10. Concurrency and filesystem behavior
-
-- Use atomic replace (`write temp -> validate -> rename`) for state/config files when practical.
-- Use `flock` for list/state mutations where concurrent SSO sessions could otherwise lose updates.
-- Create unique backup IDs; second-level timestamps alone are insufficient.
-- Separate UI output from function return data. Helpers used through command substitution should emit only their machine-readable return value on stdout; diagnostics/UI belong on stderr or outside the helper.
-
-## 11. Compatibility
-
-Supported OS versions and documented dependencies are user-facing contract and belong in `README.md`. Before changing version support, verify the actual commands/packages/kernel capabilities on those releases.
-
-Backends may differ across supported systems. Backend fallback must not silently weaken correctness or verification.
-
-## 12. Testing boundary
-
-Development validation must not mutate the shared AI Server Agent host's real firewall, sysctl, systemd, Fail2Ban, package database, or networking.
-
-Use, in increasing integration depth as warranted:
-
-1. pure Bash/unit-style tests for parsers and helpers;
-2. temporary-root/mocked command tests for filesystem/config behavior;
-3. isolated namespace/container tests when kernel/network behavior is needed;
-4. a dedicated disposable VM/server for full root/systemd/firewall integration;
-5. owner validation on the intended real VPN/proxy server at the explicit release test boundary.
-
-See `docs/DEVELOPMENT.md` for the executable workflow.
+See `docs/DEVELOPMENT.md` for the normal workflow.
