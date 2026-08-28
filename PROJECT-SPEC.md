@@ -20,7 +20,7 @@ Primary users are operators of Debian/Ubuntu servers who want one lightweight sc
 - Fail2Ban setup/integration;
 - backup, rollback, update, and uninstall.
 
-VPN/proxy workloads are the main use case, but v1.1.0 does not need protocol-specific automation.
+VPN/proxy workloads are the main use case. Protocol-specific automation is not a standing product requirement.
 
 ## Product principles
 
@@ -47,25 +47,26 @@ The current toolkit is a modular Bash application with:
 
 Preserve this small architecture unless a concrete operator problem proves that a larger design is necessary.
 
-## Current active outcome — v1.1.0
+## Delivered baseline — v1.1.0
 
-v1.1.0 is a **focused stabilization release for the existing script**.
+`v1.1.0` is the published focused stabilization baseline for the existing script.
 
-Required work is limited to:
+The delivered baseline includes:
 
-- keep the existing regression/CI baseline;
-- preserve operator-owned Fail2Ban configuration and validate SSO-owned config;
-- retain the already-integrated rollback/uninstall correctness fixes;
-- fix local/offline installation and make update/reinstall explicit and simple;
-- ensure normal `sso` use runs installed files instead of re-downloading the project;
-- fix reproduced CPU/RPS persistence/correctness defects;
-- validate firewall list input, prevent false-success, and make common add/remove actions immediate and easy;
-- fix current output/UI contract defects that affect use;
-- publish v1.1.0 and test it on a real server.
+- regression/CI coverage for release-critical behavior;
+- preservation of operator-owned Fail2Ban configuration and validation of SSO-owned configuration;
+- hardened rollback/uninstall ownership and recovery behavior;
+- complete local/offline installation and explicit update/reinstall;
+- normal `sso` startup using installed files without an update/download side effect;
+- corrected CPU/RPS/RFS/XPS apply, persistence, rollback, and uninstall restoration behavior;
+- validated firewall list input, honest backend failure reporting, and immediate common add/remove behavior;
+- safe cleanup of installer-created previous-install fallback state;
+- successful real Ubuntu owner validation;
+- normal Git tag/GitHub Release publication.
 
-### Explicit v1.1.0 non-goals
+### v1.1.0 non-goals retained after delivery
 
-Do **not** add these merely to make the release look more complete:
+Do **not** add these merely because they were outside the delivered release:
 
 - a custom transactional installer/update subsystem;
 - inode-identity/race protocols for every temporary file/path;
@@ -78,27 +79,27 @@ Do **not** add these merely to make the release look more complete:
 - broad concurrency, locking, or backend redesign without a reproduced problem;
 - large CI matrices or mandatory independent-review ceremony for otherwise bounded changes.
 
-A versioned GitHub release/tag and normal HTTPS download path are sufficient for the v1.1.0 product contract. Straightforward checksums may be published when useful, but a custom trust engine is not a release requirement.
+A normal versioned GitHub release/tag and HTTPS source download path remain sufficient unless a future demonstrated requirement proves otherwise.
 
-## v1.1.0 completion criteria
+## Maintenance posture after v1.1.0
 
-The release is ready when:
+There is no standing implementation roadmap merely because v1.1.0 is complete.
 
-- the focused v1.1.0 Issues are integrated;
-- reproduced defects targeted by those Issues have focused regression coverage where practical;
-- Bash syntax, ShellCheck error-level checks, and the repository test suite pass on the exact release commit;
-- normal `sso` launch uses the installed application without update/download side effects;
-- local install works from the actual local payload directory;
-- explicit update/reinstall preserves a simple usable fallback and reports failure accurately;
-- Fail2Ban and rollback/uninstall preserve unrelated operator state;
-- firewall invalid input and backend failure do not produce false success;
-- v1.1.0 is tagged/published with concise notes and a short owner test checklist.
+Open new executable work only when justified by one of these:
+
+- a reproduced defect or regression;
+- concrete operator feedback;
+- a supported OS/runtime compatibility change;
+- a security or correctness problem;
+- an explicit owner-approved bounded product outcome.
+
+Keep fixes proportional to the demonstrated need. Do not manufacture architecture, features, process, or review ceremony to keep the project busy.
 
 ## Future work
 
 Ideas such as VPN-aware firewall expansion, IPv6 sets, VPN Doctor, protocol profiles, adaptive tuning, managed blocklist sources, and broader abuse tooling are **deferred ideas**, not committed phases.
 
-After the owner tests v1.1.0, keep only ideas that solve a demonstrated need and justify their complexity.
+Keep only ideas that solve a demonstrated need and justify their complexity.
 
 ## Engineering boundaries
 
@@ -109,7 +110,7 @@ After the owner tests v1.1.0, keep only ideas that solve a demonstrated need and
 - Use temporary roots, mocks, or a dedicated disposable system where needed.
 - GitHub Copilot review is not used for this repository.
 - Default review is proportional Master/developer self-review plus CI. Independent review is added only when the **actual candidate** introduces exceptional destructive/security complexity that materially benefits from it.
-- Real server validation remains an owner/human operation unless a specific disposable target is explicitly authorized.
+- Real-server validation remains an owner/human operation unless a specific disposable target is explicitly authorized.
 
 ## Source-of-truth model
 
