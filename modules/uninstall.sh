@@ -100,6 +100,50 @@ uninstall_safe_recursive_target() {
   return 0
 }
 
+# install.sh creates ${SSO_DIR}.bak only after verifying the previous install
+# contains the complete required SSO payload. Re-check the same ownership
+# signature before uninstall is allowed to delete that recursive fallback.
+uninstall_sso_payload_dir_is_recognized() {
+  local root="$1" rel
+
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  for rel in \
+    install.sh \
+    sso.sh \
+    modules/utils.sh \
+    modules/network.sh \
+    modules/cpu_irq.sh \
+    modules/firewall.sh \
+    modules/fail2ban.sh \
+    modules/rollback.sh \
+    modules/uninstall.sh \
+    assets/whitelist-default.ipv4; do
+    [[ -f "$root/$rel" && ! -L "$root/$rel" ]] || return 1
+  done
+  return 0
+}
+
+# A recognized payload is not sufficient recursive-delete authority if the
+# fallback itself, or any path below it, is a mount boundary. Inspect the
+# current mount namespace and fail closed when that inspection is unavailable
+# or ambiguous. The caller repeats this check immediately before deletion.
+uninstall_recursive_tree_is_mount_safe() {
+  local root="${1%/}" mounts="" target=""
+
+  [[ -n "$root" && "$root" == /* && "$root" != "/" ]] || return 1
+  command -v findmnt >/dev/null 2>&1 || return 1
+  mounts="$(findmnt --kernel --noheadings --raw --output TARGET 2>/dev/null)" || return 1
+  [[ -n "$mounts" ]] || return 1
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if [[ "$target" == "$root" || "$target" == "$root/"* ]]; then
+      return 1
+    fi
+  done <<< "$mounts"
+  return 0
+}
+
 uninstall_remove_fail2ban_owned_state() {
   local managed="${F2B_SSO_LOCAL:-/etc/fail2ban/jail.d/sso.local}"
   local marker="${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}"
@@ -306,14 +350,29 @@ module_uninstall() {
     return 0
   fi
 
-  local sso_dir="${SSO_DIR}"
+  local sso_dir="${SSO_DIR}" previous_install="${SSO_DIR}.bak"
   if ! uninstall_safe_recursive_target "$STATE_DIR" \
     || ! uninstall_safe_recursive_target "$BACKUP_DIR_BASE" \
-    || ! uninstall_safe_recursive_target "$sso_dir"; then
+    || ! uninstall_safe_recursive_target "$sso_dir" \
+    || ! uninstall_safe_recursive_target "$previous_install"; then
     err "Refusing uninstall because a recursive cleanup path is unsafe."
-    err "State: $STATE_DIR | Backups: $BACKUP_DIR_BASE | Install: ${sso_dir:-<empty>}"
+    err "State: $STATE_DIR | Backups: $BACKUP_DIR_BASE | Install: ${sso_dir:-<empty>} | Previous: ${previous_install:-<empty>}"
     pause
     return 0
+  fi
+
+  # Fail before any runtime/package mutation when a previous-install path is
+  # present but cannot be positively identified as the installer-created SSO
+  # fallback. Re-check again immediately before recursive removal below.
+  if [[ -e "$previous_install" || -L "$previous_install" ]]; then
+    if ! uninstall_sso_payload_dir_is_recognized "$previous_install"; then
+      uninstall_abort_with_recovery "Previous install fallback is not a recognized SSO payload; refusing recursive removal: $previous_install"
+      return 0
+    fi
+    if ! uninstall_recursive_tree_is_mount_safe "$previous_install"; then
+      uninstall_abort_with_recovery "Could not prove previous install fallback is free of mount boundaries; refusing recursive removal: $previous_install"
+      return 0
+    fi
   fi
 
   # Ownership baselines live outside the replaceable install tree. Retry the
@@ -468,6 +527,27 @@ module_uninstall() {
     backup_restore_network_runtime "$bbr_baseline" || runtime_rc=$?
     if [[ "$runtime_rc" != "0" && "$runtime_rc" != "2" ]]; then
       uninstall_abort_with_recovery "Could not fully restore captured fq/BBR runtime state."
+      return 0
+    fi
+  fi
+
+  # The update installer keeps one recognized previous application at
+  # ${SSO_DIR}.bak for rollback. It is SSO-owned, but delete it only after all
+  # external cleanup has succeeded and only when its complete payload proves
+  # that it is the installer-created fallback rather than unrelated root data.
+  if [[ -e "$previous_install" || -L "$previous_install" ]]; then
+    if ! uninstall_sso_payload_dir_is_recognized "$previous_install"; then
+      uninstall_abort_with_recovery "Previous install fallback is not a recognized SSO payload; refusing recursive removal: $previous_install"
+      return 0
+    fi
+    if ! uninstall_recursive_tree_is_mount_safe "$previous_install"; then
+      uninstall_abort_with_recovery "Could not prove previous install fallback is free of mount boundaries; refusing recursive removal: $previous_install"
+      return 0
+    fi
+    info "Removing previous SSO install fallback: $previous_install"
+    if ! rm -rf --one-file-system --preserve-root=all -- "$previous_install" \
+      || [[ -e "$previous_install" || -L "$previous_install" ]]; then
+      uninstall_abort_with_recovery "Could not remove previous SSO install fallback completely: $previous_install"
       return 0
     fi
   fi
