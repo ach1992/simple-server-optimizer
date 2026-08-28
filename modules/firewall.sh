@@ -15,81 +15,134 @@ STATE_BTFLAG="$STATE_DIR/bittorrent-block.enabled"
 ASSET_BLOCKLIST="$ASSETS_DIR/blocklist-ip.ipv4"
 ASSET_WHITEDEFAULT="$ASSETS_DIR/whitelist-default.ipv4"
 
-ensure_default_whitelist() {
-  ensure_dirs "$STATE_DIR"
-  if [[ ! -f "$STATE_WHITELIST" ]]; then
-    cp -a "$ASSET_WHITEDEFAULT" "$STATE_WHITELIST"
-  fi
-  # guarantee required default
-  if ! grep -qx "10.235.0.0/19" "$STATE_WHITELIST" 2>/dev/null; then
-    echo "10.235.0.0/19" >> "$STATE_WHITELIST"
-  fi
-  # dedupe
-  awk 'NF && $0 !~ /^#/' "$STATE_WHITELIST" | sed 's/[[:space:]]//g' | sort -u > "$STATE_WHITELIST.tmp"
-  mv "$STATE_WHITELIST.tmp" "$STATE_WHITELIST"
+sanitize_iplist() {
+  awk '
+    {
+      gsub(/\r/, "", $0)
+      sub(/[[:space:]]*[#;].*$/, "", $0)
+      gsub(/[[:space:]]/, "", $0)
+      if ($0 != "") print $0
+    }
+  ' | sort -u
 }
 
+normalize_iplist_source() {
+  local source="$1"
+  local destination="$2"
+  local label="${3:-IP list}"
+  local tmp entry
+
+  tmp="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+  if ! sanitize_iplist < "$source" > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    if ! validate_ipv4_or_cidr "$entry"; then
+      err "$label contains an invalid IPv4/CIDR entry: $entry"
+      rm -f -- "$tmp"
+      return 1
+    fi
+  done < "$tmp"
+
+  mv -- "$tmp" "$destination"
+}
+
+ensure_default_whitelist() {
+  local candidate
+  ensure_dirs "$STATE_DIR"
+
+  if [[ -e "$STATE_WHITELIST" || -L "$STATE_WHITELIST" ]]; then
+    [[ -f "$STATE_WHITELIST" && ! -L "$STATE_WHITELIST" ]] || {
+      err "Whitelist state is not a normal file: $STATE_WHITELIST"
+      return 1
+    }
+  fi
+
+  candidate="$(mktemp "${STATE_WHITELIST}.candidate.XXXXXX")" || return 1
+
+  if [[ -f "$STATE_WHITELIST" ]]; then
+    cat -- "$STATE_WHITELIST" > "$candidate" || { rm -f -- "$candidate"; return 1; }
+  else
+    [[ -f "$ASSET_WHITEDEFAULT" && ! -L "$ASSET_WHITEDEFAULT" ]] || {
+      err "Missing default whitelist asset: $ASSET_WHITEDEFAULT"
+      rm -f -- "$candidate"
+      return 1
+    }
+    cat -- "$ASSET_WHITEDEFAULT" > "$candidate" || { rm -f -- "$candidate"; return 1; }
+  fi
+
+  if ! grep -qx "10.235.0.0/19" "$candidate" 2>/dev/null; then
+    printf '%s\n' "10.235.0.0/19" >> "$candidate"
+  fi
+
+  if ! normalize_iplist_source "$candidate" "$STATE_WHITELIST" "Whitelist"; then
+    rm -f -- "$candidate"
+    return 1
+  fi
+  rm -f -- "$candidate"
+}
 
 ensure_state_blocklist() {
   ensure_dirs "$STATE_DIR"
-  # Create empty blocklist if missing (so user can add entries via menu)
-  if [[ ! -f "$STATE_BLOCKLIST" ]]; then
+  if [[ ! -e "$STATE_BLOCKLIST" ]]; then
     : > "$STATE_BLOCKLIST"
   fi
-  # Deduplicate / sanitize
-  sanitize_iplist < "$STATE_BLOCKLIST" > "$STATE_BLOCKLIST.tmp" || true
-  mv "$STATE_BLOCKLIST.tmp" "$STATE_BLOCKLIST"
-}
-
-sanitize_iplist() {
-  # stdin -> stdout: keep ipv4/cidr lines, remove comments/spaces
-  awk '
-    BEGIN{FS=""; OFS=""}
-    {
-      gsub(/\r/,"",$0)
-      sub(/[[:space:]]*[#;].*$/,"",$0)
-      gsub(/[[:space:]]/,"",$0)
-      if ($0=="") next
-      print $0
-    }
-  ' | sort -u
+  [[ -f "$STATE_BLOCKLIST" && ! -L "$STATE_BLOCKLIST" ]] || {
+    err "Blocklist state is not a normal file: $STATE_BLOCKLIST"
+    return 1
+  }
+  normalize_iplist_source "$STATE_BLOCKLIST" "$STATE_BLOCKLIST" "Blocklist"
 }
 
 module_firewall_import_blocklist() {
   header
   section "Import blocklist from assets"
   ensure_dirs "$STATE_DIR"
-  ensure_default_whitelist
 
-  if [[ ! -f "$ASSET_BLOCKLIST" ]]; then
+  if [[ ! -f "$ASSET_BLOCKLIST" || -L "$ASSET_BLOCKLIST" ]]; then
     err "Missing assets/blocklist-ip.ipv4"
     err "Place your merged file in: $ASSET_BLOCKLIST"
-    pause; return
+    pause
+    return 0
+  fi
+
+  if ! ensure_default_whitelist; then
+    pause
+    return 0
   fi
 
   local d
   d="$(backup_create "firewall:import_blocklist")"
 
-  sanitize_iplist < "$ASSET_BLOCKLIST" > "$STATE_BLOCKLIST"
+  if ! normalize_iplist_source "$ASSET_BLOCKLIST" "$STATE_BLOCKLIST" "Blocklist asset"; then
+    err "Blocklist import rejected; existing state was not replaced."
+    pause
+    return 0
+  fi
+
   ok "Imported into: $STATE_BLOCKLIST"
   ok "Entries: $(wc -l < "$STATE_BLOCKLIST" | tr -d " ")"
-  firewall_persist_enable
+
+  if ! firewall_persist_enable; then
+    err "Blocklist was saved, but firewall persistence could not be enabled."
+    pause
+    return 0
+  fi
 
   ok "Backup: $d"
   pause
 }
 
 detect_firewall_backend() {
-  # IMPORTANT: must print ONLY the backend token to stdout (used by callers).
-  # Any diagnostics should go to stderr to avoid breaking case-matching.
   if cmd_exists nft; then
-    # ensure nftables is actually usable (kernel + ruleset access)
     if nft list ruleset >/dev/null 2>&1; then
       echo "nft"
       return 0
     fi
     echo "nft-unusable" >&2
-    # fall through to try iptables+ipset as a fallback
   fi
 
   if cmd_exists iptables && cmd_exists ipset; then
@@ -100,13 +153,27 @@ detect_firewall_backend() {
   echo "none"
 }
 
+firewall_active_backend() {
+  if cmd_exists nft && nft list table inet sso >/dev/null 2>&1; then
+    echo "nft"
+    return 0
+  fi
 
+  if cmd_exists ipset && cmd_exists iptables \
+    && ipset list sso_block_v4 >/dev/null 2>&1 \
+    && ipset list sso_white_v4 >/dev/null 2>&1 \
+    && iptables -S SSO_IN >/dev/null 2>&1 \
+    && iptables -S SSO_OUT >/dev/null 2>&1; then
+    echo "ipset"
+    return 0
+  fi
 
+  echo "none"
+}
 
 firewall_persist_enable() {
   ensure_dirs "$STATE_DIR" /usr/local/sbin /etc/systemd/system
-  # store install dir for restore scripts
-  echo "$SSO_DIR" > "$STATE_DIR/install_dir" 2>/dev/null || true
+  printf '%s\n' "$SSO_DIR" > "$STATE_DIR/install_dir" || return 1
 
   cat > /usr/local/sbin/sso-firewall-restore <<'EOS'
 #!/usr/bin/env bash
@@ -128,9 +195,9 @@ case "$backend" in
   *) echo "No supported firewall backend." >&2; exit 1 ;;
 esac
 EOS
-  chmod +x /usr/local/sbin/sso-firewall-restore
+  chmod 755 /usr/local/sbin/sso-firewall-restore || return 1
 
-  cat > /etc/systemd/system/sso-firewall.service <<'EOF'
+  cat > /etc/systemd/system/sso-firewall.service <<'EOF_UNIT'
 [Unit]
 Description=SSO Firewall (blocklist/whitelist)
 After=network-online.target
@@ -143,164 +210,306 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_UNIT
 
-  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
-  run_step "Enabling firewall persistence" systemctl enable --now sso-firewall.service || warn "Could not enable sso-firewall.service (continuing)."
+  run_step "Reloading systemd units" systemctl daemon-reload || return 1
+  run_step "Enabling firewall persistence" systemctl enable --now sso-firewall.service || return 1
 }
 
 firewall_persist_disable() {
   info "Disabling firewall persistence"
   systemd_disable_now_safe sso-firewall.service
-  ok "Disabling firewall persistence - done"
-  rm -f /etc/systemd/system/sso-firewall.service 2>/dev/null || true
-  rm -f /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
-  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
+  rm -f /etc/systemd/system/sso-firewall.service /usr/local/sbin/sso-firewall-restore 2>/dev/null || true
+  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed."
+}
+
+nft_add_file_elements() {
+  local set_name="$1"
+  local file="$2"
+  local elements
+
+  [[ -s "$file" ]] || return 0
+  elements="$(paste -sd, "$file")"
+  nft "add element inet sso $set_name { $elements }"
 }
 
 nft_apply() {
-  ensure_default_whitelist
-  ensure_state_blocklist
+  ensure_default_whitelist || return 1
+  ensure_state_blocklist || return 1
 
-# clean previous SSO table/rules (recreate fresh)
-if nft list table inet sso >/dev/null 2>&1; then
-  nft flush table inet sso 2>/dev/null || true
-  nft delete table inet sso 2>/dev/null || true
-fi
-
-
-  # Build ruleset (idempotent)
-  nft add table inet sso 2>/dev/null || true
-  nft "add set inet sso $SSO_SET_BLOCK { type ipv4_addr; flags interval; auto-merge; }" 2>/dev/null || true
-  nft "add set inet sso $SSO_SET_WHITE { type ipv4_addr; flags interval; auto-merge; }" 2>/dev/null || true
-
-  # chains
-  nft "add chain inet sso $SSO_CHAIN_IN { type filter hook input priority 0; policy accept; }" 2>/dev/null || true
-  nft "add chain inet sso $SSO_CHAIN_OUT { type filter hook output priority 0; policy accept; }" 2>/dev/null || true
-
-  # flush chains to avoid duplicates
-  nft "flush chain inet sso $SSO_CHAIN_IN" 2>/dev/null || true
-  nft "flush chain inet sso $SSO_CHAIN_OUT" 2>/dev/null || true
-
-  # load sets: flush then add
-  nft "flush set inet sso $SSO_SET_BLOCK" 2>/dev/null || true
-  nft "flush set inet sso $SSO_SET_WHITE" 2>/dev/null || true
-
-  while read -r ip; do
-    [[ -n "$ip" ]] || continue
-    nft "add element inet sso $SSO_SET_BLOCK { $ip }" 2>/dev/null || true
-  done < "$STATE_BLOCKLIST"
-
-  while read -r ip; do
-    [[ -n "$ip" ]] || continue
-    nft "add element inet sso $SSO_SET_WHITE { $ip }" 2>/dev/null || true
-  done < "$STATE_WHITELIST"
-
-  # rules: whitelist priority
-  nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_WHITE} accept" 2>/dev/null || true
-  # Optional: block BitTorrent traffic by common ports (best-effort)
-  if [[ -f "$STATE_BTFLAG" ]]; then
-    nft "add rule inet sso $SSO_CHAIN_IN tcp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
-    nft "add rule inet sso $SSO_CHAIN_IN udp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+  if nft list table inet sso >/dev/null 2>&1; then
+    nft delete table inet sso >/dev/null 2>&1 || {
+      err "Could not replace the existing SSO nftables table."
+      return 1
+    }
   fi
-  nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_BLOCK} drop" 2>/dev/null || true
 
-  nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_WHITE} accept" 2>/dev/null || true
+  nft add table inet sso >/dev/null 2>&1 || return 1
+  nft "add set inet sso $SSO_SET_BLOCK { type ipv4_addr; flags interval; auto-merge; }" >/dev/null 2>&1 || return 1
+  nft "add set inet sso $SSO_SET_WHITE { type ipv4_addr; flags interval; auto-merge; }" >/dev/null 2>&1 || return 1
+  nft "add chain inet sso $SSO_CHAIN_IN { type filter hook input priority 0; policy accept; }" >/dev/null 2>&1 || return 1
+  nft "add chain inet sso $SSO_CHAIN_OUT { type filter hook output priority 0; policy accept; }" >/dev/null 2>&1 || return 1
+
+  nft_add_file_elements "$SSO_SET_BLOCK" "$STATE_BLOCKLIST" >/dev/null 2>&1 || {
+    err "nftables rejected one or more blocklist entries."
+    return 1
+  }
+  nft_add_file_elements "$SSO_SET_WHITE" "$STATE_WHITELIST" >/dev/null 2>&1 || {
+    err "nftables rejected one or more whitelist entries."
+    return 1
+  }
+
+  nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_WHITE} accept" >/dev/null 2>&1 || return 1
   if [[ -f "$STATE_BTFLAG" ]]; then
-    nft "add rule inet sso $SSO_CHAIN_OUT tcp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
-    nft "add rule inet sso $SSO_CHAIN_OUT udp dport { 6881-6889, 6969, 51413 } drop" 2>/dev/null || true
+    nft "add rule inet sso $SSO_CHAIN_IN tcp dport { 6881-6889, 6969, 51413 } drop" >/dev/null 2>&1 || return 1
+    nft "add rule inet sso $SSO_CHAIN_IN udp dport { 6881-6889, 6969, 51413 } drop" >/dev/null 2>&1 || return 1
   fi
-  nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_BLOCK} drop" 2>/dev/null || true
+  nft "add rule inet sso $SSO_CHAIN_IN ip saddr @${SSO_SET_BLOCK} drop" >/dev/null 2>&1 || return 1
 
-  nft list table inet sso >/dev/null 2>&1 || { err "nftables apply did not create expected table."; return 1; }
+  nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_WHITE} accept" >/dev/null 2>&1 || return 1
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    nft "add rule inet sso $SSO_CHAIN_OUT tcp dport { 6881-6889, 6969, 51413 } drop" >/dev/null 2>&1 || return 1
+    nft "add rule inet sso $SSO_CHAIN_OUT udp dport { 6881-6889, 6969, 51413 } drop" >/dev/null 2>&1 || return 1
+  fi
+  nft "add rule inet sso $SSO_CHAIN_OUT ip daddr @${SSO_SET_BLOCK} drop" >/dev/null 2>&1 || return 1
+
+  nft list table inet sso >/dev/null 2>&1 || {
+    err "nftables apply did not create the expected SSO table."
+    return 1
+  }
+
   ok "Applied nftables backend (INPUT+OUTPUT)."
-  return 0
+}
+
+ipset_load_file() {
+  local set_name="$1"
+  local file="$2"
+  local entry
+  local restore_file
+
+  restore_file="$(mktemp)" || return 1
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    printf 'add %s %s\n' "$set_name" "$entry" >> "$restore_file"
+  done < "$file"
+
+  if [[ -s "$restore_file" ]] && ! ipset restore < "$restore_file" >/dev/null 2>&1; then
+    rm -f -- "$restore_file"
+    return 1
+  fi
+  rm -f -- "$restore_file"
+}
+
+ipset_prepare_set() {
+  local set_name="$1"
+  if ipset list "$set_name" >/dev/null 2>&1; then
+    ipset flush "$set_name" >/dev/null 2>&1
+  else
+    ipset create "$set_name" hash:net family inet maxelem 200000 >/dev/null 2>&1
+  fi
+}
+
+iptables_prepare_chain() {
+  local chain="$1"
+  if iptables -S "$chain" >/dev/null 2>&1; then
+    iptables -F "$chain" >/dev/null 2>&1
+  else
+    iptables -N "$chain" >/dev/null 2>&1
+  fi
 }
 
 ipset_apply() {
-  ensure_default_whitelist
-  ensure_state_blocklist
+  ensure_default_whitelist || return 1
+  ensure_state_blocklist || return 1
 
-  # recreate sets (remove old types/settings)
-  ipset destroy sso_block_v4 2>/dev/null || true
-  ipset destroy sso_white_v4 2>/dev/null || true
+  ipset_prepare_set sso_block_v4 || { err "Could not prepare block ipset."; return 1; }
+  ipset_prepare_set sso_white_v4 || { err "Could not prepare whitelist ipset."; return 1; }
 
-  ipset create sso_block_v4 hash:net family inet maxelem 200000 2>/dev/null || true
-  ipset create sso_white_v4 hash:net family inet maxelem 200000 2>/dev/null || true
-  ipset flush sso_block_v4 2>/dev/null || true
-  ipset flush sso_white_v4 2>/dev/null || true
+  ipset_load_file sso_block_v4 "$STATE_BLOCKLIST" || { err "ipset rejected one or more blocklist entries."; return 1; }
+  ipset_load_file sso_white_v4 "$STATE_WHITELIST" || { err "ipset rejected one or more whitelist entries."; return 1; }
 
-  while read -r ip; do
-    [[ -n "$ip" ]] || continue
-    ipset add sso_block_v4 "$ip" 2>/dev/null || true
-  done < "$STATE_BLOCKLIST"
+  iptables_prepare_chain SSO_IN || return 1
+  iptables_prepare_chain SSO_OUT || return 1
 
-  while read -r ip; do
-    [[ -n "$ip" ]] || continue
-    ipset add sso_white_v4 "$ip" 2>/dev/null || true
-  done < "$STATE_WHITELIST"
+  iptables -C INPUT -j SSO_IN >/dev/null 2>&1 || iptables -I INPUT 1 -j SSO_IN >/dev/null 2>&1 || return 1
+  iptables -C OUTPUT -j SSO_OUT >/dev/null 2>&1 || iptables -I OUTPUT 1 -j SSO_OUT >/dev/null 2>&1 || return 1
 
-  # iptables rules (idempotent)
-  iptables -N SSO_IN 2>/dev/null || true
-  iptables -N SSO_OUT 2>/dev/null || true
-  iptables -F SSO_IN 2>/dev/null || true
-  iptables -F SSO_OUT 2>/dev/null || true
-
-  iptables -C INPUT -j SSO_IN 2>/dev/null || iptables -I INPUT 1 -j SSO_IN
-  iptables -C OUTPUT -j SSO_OUT 2>/dev/null || iptables -I OUTPUT 1 -j SSO_OUT
-
-  # whitelist priority
-  iptables -A SSO_IN  -m set --match-set sso_white_v4 src -j RETURN
+  iptables -A SSO_IN -m set --match-set sso_white_v4 src -j RETURN >/dev/null 2>&1 || return 1
   if [[ -f "$STATE_BTFLAG" ]]; then
-    iptables -A SSO_IN  -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP
-    iptables -A SSO_IN  -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP
+    iptables -A SSO_IN -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP >/dev/null 2>&1 || return 1
+    iptables -A SSO_IN -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP >/dev/null 2>&1 || return 1
   fi
-  iptables -A SSO_IN  -m set --match-set sso_block_v4 src -j DROP
-  iptables -A SSO_IN  -j RETURN
+  iptables -A SSO_IN -m set --match-set sso_block_v4 src -j DROP >/dev/null 2>&1 || return 1
+  iptables -A SSO_IN -j RETURN >/dev/null 2>&1 || return 1
 
-  iptables -A SSO_OUT -m set --match-set sso_white_v4 dst -j RETURN
+  iptables -A SSO_OUT -m set --match-set sso_white_v4 dst -j RETURN >/dev/null 2>&1 || return 1
   if [[ -f "$STATE_BTFLAG" ]]; then
-    iptables -A SSO_OUT -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP
-    iptables -A SSO_OUT -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP
+    iptables -A SSO_OUT -p tcp -m multiport --dports 6881:6889,6969,51413 -j DROP >/dev/null 2>&1 || return 1
+    iptables -A SSO_OUT -p udp -m multiport --dports 6881:6889,6969,51413 -j DROP >/dev/null 2>&1 || return 1
   fi
-  iptables -A SSO_OUT -m set --match-set sso_block_v4 dst -j DROP
-  iptables -A SSO_OUT -j RETURN
+  iptables -A SSO_OUT -m set --match-set sso_block_v4 dst -j DROP >/dev/null 2>&1 || return 1
+  iptables -A SSO_OUT -j RETURN >/dev/null 2>&1 || return 1
 
-  ipset list sso_block_v4 >/dev/null 2>&1 || { err "ipset apply did not create expected sets."; return 1; }
-  iptables -S SSO_IN >/dev/null 2>&1 || { err "iptables apply did not create expected chains."; return 1; }
+  ipset list sso_block_v4 >/dev/null 2>&1 || { err "ipset apply did not create the expected sets."; return 1; }
+  iptables -S SSO_IN >/dev/null 2>&1 || { err "iptables apply did not create the expected chains."; return 1; }
+
   ok "Applied iptables+ipset backend (INPUT+OUTPUT)."
-  return 0
+}
+
+firewall_runtime_set_change() {
+  local backend="$1"
+  local list_kind="$2"
+  local action="$3"
+  local entry="$4"
+  local set_name
+
+  case "$list_kind" in
+    block) set_name="$SSO_SET_BLOCK" ;;
+    white) set_name="$SSO_SET_WHITE" ;;
+    *) return 1 ;;
+  esac
+
+  case "$backend" in
+    nft)
+      if nft "get element inet sso $set_name { $entry }" >/dev/null 2>&1; then
+        [[ "$action" == "add" ]] && return 0
+        nft "delete element inet sso $set_name { $entry }" >/dev/null 2>&1
+      else
+        [[ "$action" == "remove" ]] && return 0
+        nft "add element inet sso $set_name { $entry }" >/dev/null 2>&1
+      fi
+      ;;
+    ipset)
+      if ipset test "$set_name" "$entry" >/dev/null 2>&1; then
+        [[ "$action" == "add" ]] && return 0
+        ipset del "$set_name" "$entry" >/dev/null 2>&1
+      else
+        [[ "$action" == "remove" ]] && return 0
+        ipset add "$set_name" "$entry" >/dev/null 2>&1
+      fi
+      ;;
+    none) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+firewall_list_change() {
+  local list_kind="$1"
+  local action="$2"
+  local entry="$3"
+  local file backend previous candidate
+
+  validate_ipv4_or_cidr "$entry" || {
+    err "Invalid IPv4 or CIDR: $entry"
+    return 1
+  }
+
+  case "$list_kind" in
+    block)
+      ensure_state_blocklist || return 1
+      file="$STATE_BLOCKLIST"
+      ;;
+    white)
+      ensure_default_whitelist || return 1
+      file="$STATE_WHITELIST"
+      if [[ "$action" == "remove" && "$entry" == "10.235.0.0/19" ]]; then
+        err "10.235.0.0/19 is the required default whitelist entry and cannot be removed here."
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+
+  previous="$(mktemp)" || return 1
+  candidate="$(mktemp)" || { rm -f -- "$previous"; return 1; }
+  cp -a -- "$file" "$previous" || { rm -f -- "$previous" "$candidate"; return 1; }
+
+  case "$action" in
+    add)
+      cat -- "$file" > "$candidate" || true
+      printf '%s\n' "$entry" >> "$candidate"
+      ;;
+    remove)
+      grep -vxF "$entry" "$file" > "$candidate" || true
+      ;;
+    *)
+      rm -f -- "$previous" "$candidate"
+      return 1
+      ;;
+  esac
+
+  if ! normalize_iplist_source "$candidate" "$file" "$list_kind list"; then
+    cp -a -- "$previous" "$file" 2>/dev/null || true
+    rm -f -- "$previous" "$candidate"
+    return 1
+  fi
+
+  if [[ "$list_kind" == "white" ]] && ! ensure_default_whitelist; then
+    cp -a -- "$previous" "$file" 2>/dev/null || true
+    rm -f -- "$previous" "$candidate"
+    return 1
+  fi
+
+  backend="$(firewall_active_backend)"
+  if [[ "$backend" != "none" ]]; then
+    if ! firewall_runtime_set_change "$backend" "$list_kind" "$action" "$entry"; then
+      cp -a -- "$previous" "$file" 2>/dev/null || true
+      err "Runtime firewall update failed; the saved list was restored."
+      rm -f -- "$previous" "$candidate"
+      return 1
+    fi
+    ok "Saved and applied immediately using $backend."
+  else
+    ok "Saved. SSO firewall is not currently active, so no runtime update was needed."
+  fi
+
+  rm -f -- "$previous" "$candidate"
 }
 
 module_firewall_apply() {
   header
   section "Apply blocklist (INPUT+OUTPUT default)"
-  ensure_default_whitelist
 
-  if [[ ! -f "$STATE_BLOCKLIST" ]]; then
-    warn "State blocklist not found. Creating empty one so you can add IPs via Blacklist manager."
-    : > "$STATE_BLOCKLIST"
+  if ! ensure_default_whitelist || ! ensure_state_blocklist; then
+    err "Firewall state validation failed. Nothing was applied."
+    pause
+    return 0
   fi
 
-  local d
+  local d backend
   d="$(backup_create "firewall:apply")"
-
-  local backend
   backend="$(detect_firewall_backend)"
+
   case "$backend" in
-    nft) if ! run_step "Applying firewall rules (nftables)" nft_apply; then pause; return; fi ;;
-    ipset) if ! run_step "Applying firewall rules (iptables+ipset)" ipset_apply; then pause; return; fi ;;
+    nft)
+      if ! run_step "Applying firewall rules (nftables)" nft_apply; then
+        err "Firewall apply failed."
+        pause
+        return 0
+      fi
+      ;;
+    ipset)
+      if ! run_step "Applying firewall rules (iptables+ipset)" ipset_apply; then
+        err "Firewall apply failed."
+        pause
+        return 0
+      fi
+      ;;
     *)
       if cmd_exists nft; then
-        warn "nft command exists but nftables seems unusable on this system (kernel/module or permissions)."
-        warn "Try: apt-get install nftables && modprobe nf_tables (then re-run), or use iptables+ipset."
+        warn "nft exists but is not usable on this system."
       fi
       err "No supported firewall backend found (need nft OR iptables+ipset)."
-      pause; return
+      pause
+      return 0
       ;;
   esac
 
-  firewall_persist_enable
+  if ! firewall_persist_enable; then
+    err "Firewall rules were applied, but persistence could not be enabled."
+    pause
+    return 0
+  fi
 
   ok "Backup: $d"
   pause
@@ -309,69 +518,51 @@ module_firewall_apply() {
 module_firewall_disable() {
   header
   section "Disable SSO firewall rules"
-  local d
+  local d failed=0
   d="$(backup_create "firewall:disable")"
 
   firewall_persist_disable
 
-  # Try to remove rules from all supported backends.
-  # We VERIFY removal so we don't print success while nothing changed.
-
-  if cmd_exists nft; then
+  if cmd_exists nft && nft list table inet sso >/dev/null 2>&1; then
+    info "Removing nftables table: inet sso"
+    nft delete table inet sso >/dev/null 2>&1 || failed=1
     if nft list table inet sso >/dev/null 2>&1; then
-      info "Removing nftables table: inet sso"
-      if ! nft flush table inet sso 2>&1 | sed 's/^/    /'; then
-        warn "nft flush failed (continuing)."
-      fi
-      if ! nft delete table inet sso 2>&1 | sed 's/^/    /'; then
-        warn "nft delete failed (continuing)."
-      fi
-
-      if nft list table inet sso >/dev/null 2>&1; then
-        err "nftables table inet sso is STILL present. Firewall rules may still be active."
-        err "Common causes: running without full privileges/capabilities, or another firewall manager immediately re-loading rules."
-        err "Try as root on the host (not an unprivileged container) and check: nft list ruleset | grep -n \"table inet sso\""
-      else
-        ok "nftables table inet sso removed."
-      fi
+      err "nftables table inet sso is still present."
+      failed=1
     else
-      info "nftables table inet sso not found (nothing to remove)."
+      ok "nftables table inet sso removed."
     fi
   fi
 
   if cmd_exists iptables; then
-    info "Removing iptables chains/jumps (if present)"
-    # Remove jumps first (ignore errors if not present)
-    iptables -D INPUT  -j SSO_IN  2>/dev/null || true
+    iptables -D INPUT -j SSO_IN 2>/dev/null || true
     iptables -D OUTPUT -j SSO_OUT 2>/dev/null || true
-
-    # Flush & delete custom chains
-    iptables -F SSO_IN  2>/dev/null || true
+    iptables -F SSO_IN 2>/dev/null || true
     iptables -F SSO_OUT 2>/dev/null || true
-    iptables -X SSO_IN  2>/dev/null || true
+    iptables -X SSO_IN 2>/dev/null || true
     iptables -X SSO_OUT 2>/dev/null || true
 
-    # Verify
     if iptables -S 2>/dev/null | grep -qE '(^-N SSO_IN|^-N SSO_OUT|SSO_IN|SSO_OUT)'; then
       warn "Some iptables references to SSO chains still exist."
-    else
-      ok "iptables SSO chains removed (or were not present)."
+      failed=1
     fi
   fi
 
   if cmd_exists ipset; then
-    info "Removing ipset sets (if present)"
     ipset destroy sso_block_v4 2>/dev/null || true
     ipset destroy sso_white_v4 2>/dev/null || true
   fi
 
-  ok "SSO firewall disable finished. (Backup: $d)"
+  if [[ "$failed" -eq 0 ]]; then
+    ok "SSO firewall disabled. (Backup: $d)"
+  else
+    warn "Firewall disable finished with warnings; inspect current firewall state. (Backup: $d)"
+  fi
   pause
 }
 
-
 module_firewall_blacklist_menu() {
-  ensure_state_blocklist
+  ensure_state_blocklist || return 0
   while true; do
     header
     section "Blacklist manager"
@@ -380,12 +571,13 @@ module_firewall_blacklist_menu() {
     echo "2) Add IP/CIDR"
     echo "3) Remove IP/CIDR"
     echo "0) Back"
-    local choice
+    local choice ip
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
-        header; section "Blacklist"
-        if [[ ! -f "$STATE_BLOCKLIST" ]] || [[ "$(wc -l < "$STATE_BLOCKLIST" | tr -d ' ')" == "0" ]]; then
+        header
+        section "Blacklist"
+        if [[ ! -s "$STATE_BLOCKLIST" ]]; then
           info "Blacklist is empty."
         else
           nl -w2 -s') ' "$STATE_BLOCKLIST" || true
@@ -393,34 +585,19 @@ module_firewall_blacklist_menu() {
         pause
         ;;
       2)
-        printf "Enter IP/CIDR to blacklist: "
-        read_input "" ip
+        read_input "Enter IP/CIDR to blacklist: " ip || { warn "No input received."; pause; continue; }
         ip="${ip//[[:space:]]/}"
-        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
-        if ! validate_ipv4_or_cidr "$ip"; then
-          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
-          pause; continue
+        if firewall_list_change block add "$ip"; then
+          ok "Blacklist updated: $STATE_BLOCKLIST"
         fi
-        echo "$ip" >> "$STATE_BLOCKLIST"
-        ensure_state_blocklist
-        ok "Added."
-        warn "Re-apply firewall (menu option 2) to activate rules."
         pause
         ;;
       3)
-        printf "Enter IP/CIDR to remove: "
-        read_input "" ip
+        read_input "Enter IP/CIDR to remove: " ip || { warn "No input received."; pause; continue; }
         ip="${ip//[[:space:]]/}"
-        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
-        if ! validate_ipv4_or_cidr "$ip"; then
-          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
-          pause; continue
+        if firewall_list_change block remove "$ip"; then
+          ok "Blacklist updated: $STATE_BLOCKLIST"
         fi
-        grep -vxF "$ip" "$STATE_BLOCKLIST" > "$STATE_BLOCKLIST.tmp" || true
-        mv "$STATE_BLOCKLIST.tmp" "$STATE_BLOCKLIST"
-        ensure_state_blocklist
-        ok "Removed (if existed)."
-        warn "Re-apply firewall (menu option 2) to update active rules."
         pause
         ;;
       0) return ;;
@@ -430,7 +607,7 @@ module_firewall_blacklist_menu() {
 }
 
 module_firewall_whitelist_menu() {
-  ensure_default_whitelist
+  ensure_default_whitelist || return 0
   while true; do
     header
     section "Whitelist manager"
@@ -439,12 +616,13 @@ module_firewall_whitelist_menu() {
     echo "2) Add IP/CIDR"
     echo "3) Remove IP/CIDR"
     echo "0) Back"
-    local choice
+    local choice ip
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
-        header; section "Whitelist"
-        if [[ ! -f "$STATE_WHITELIST" ]] || [[ "$(wc -l < "$STATE_WHITELIST" | tr -d ' ')" == "0" ]]; then
+        header
+        section "Whitelist"
+        if [[ ! -s "$STATE_WHITELIST" ]]; then
           info "Whitelist is empty."
         else
           nl -w2 -s') ' "$STATE_WHITELIST" || true
@@ -452,32 +630,19 @@ module_firewall_whitelist_menu() {
         pause
         ;;
       2)
-        printf "Enter IP/CIDR to whitelist: "
-        read_input "" ip
+        read_input "Enter IP/CIDR to whitelist: " ip || { warn "No input received."; pause; continue; }
         ip="${ip//[[:space:]]/}"
-        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
-        if ! validate_ipv4_or_cidr "$ip"; then
-          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
-          pause; continue
+        if firewall_list_change white add "$ip"; then
+          ok "Whitelist updated: $STATE_WHITELIST"
         fi
-        echo "$ip" >> "$STATE_WHITELIST"
-        ensure_default_whitelist
-        ok "Added."
         pause
         ;;
       3)
-        printf "Enter IP/CIDR to remove: "
-        read_input "" ip
+        read_input "Enter IP/CIDR to remove: " ip || { warn "No input received."; pause; continue; }
         ip="${ip//[[:space:]]/}"
-        if [[ -z "${ip:-}" ]]; then err "Empty."; pause; continue; fi
-        if ! validate_ipv4_or_cidr "$ip"; then
-          err "Invalid IPv4 or CIDR. Examples: 1.2.3.4  |  1.2.3.0/24"
-          pause; continue
+        if firewall_list_change white remove "$ip"; then
+          ok "Whitelist updated: $STATE_WHITELIST"
         fi
-        grep -vxF "$ip" "$STATE_WHITELIST" > "$STATE_WHITELIST.tmp" || true
-        mv "$STATE_WHITELIST.tmp" "$STATE_WHITELIST"
-        ensure_default_whitelist
-        ok "Removed (if existed)."
         pause
         ;;
       0) return ;;
@@ -492,12 +657,18 @@ module_firewall_status() {
   local backend
   backend="$(detect_firewall_backend)"
   info "Backend: $backend"
-  ensure_default_whitelist
-  ensure_state_blocklist
-  info "Blocklist entries: $( [[ -f "$STATE_BLOCKLIST" ]] && wc -l < "$STATE_BLOCKLIST" | tr -d " " || echo 0)"
+
+  if ! ensure_default_whitelist || ! ensure_state_blocklist; then
+    err "Firewall state contains invalid data."
+    pause
+    return 0
+  fi
+
+  info "Blocklist entries: $(wc -l < "$STATE_BLOCKLIST" | tr -d " ")"
   info "Whitelist entries: $(wc -l < "$STATE_WHITELIST" | tr -d " ")"
-  info "BitTorrent block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
+  info "Common BitTorrent-port block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
   echo ""
+
   if [[ "$backend" == "nft" ]]; then
     nft list table inet sso 2>/dev/null | sed -n '1,120p' || true
   elif [[ "$backend" == "ipset" ]]; then
@@ -510,35 +681,34 @@ module_firewall_status() {
 
 module_firewall_bittorrent_menu() {
   header
-  section "BitTorrent traffic block"
+  section "Common BitTorrent ports (best effort)"
   ensure_dirs "$STATE_DIR"
+  warn "This blocks common BitTorrent-related ports only; it is not complete protocol detection."
 
   if [[ -f "$STATE_BTFLAG" ]]; then
-    warn "BitTorrent blocking is currently ENABLED."
-    echo "1) Disable BitTorrent blocking"
+    info "Common-port blocking is ENABLED."
+    echo "1) Disable common-port blocking"
     echo "0) Back"
     local choice
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
         rm -f "$STATE_BTFLAG" 2>/dev/null || true
-        ok "BitTorrent blocking disabled."
-        warn "Re-apply firewall (option 2) to update active rules."
+        ok "Common-port blocking disabled. Re-apply firewall to update active rules."
         ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
   else
-    info "BitTorrent blocking is currently disabled."
-    echo "1) Enable BitTorrent blocking"
+    info "Common-port blocking is disabled."
+    echo "1) Enable common-port blocking"
     echo "0) Back"
     local choice
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
         : > "$STATE_BTFLAG"
-        ok "BitTorrent blocking enabled."
-        warn "Re-apply firewall (option 2) to activate rules."
+        ok "Common-port blocking enabled. Re-apply firewall to activate rules."
         ;;
       0) return ;;
       *) warn "Invalid choice." ;;
