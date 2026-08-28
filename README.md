@@ -70,7 +70,7 @@ After installation, SSO opens automatically. Later you can start it with:
 sso
 ```
 
-> Stable release `v1.1.0` is published. For an exact immutable `v1.1.0` installation/update, use the Source ZIP or tarball from the [`v1.1.0` GitHub Release](https://github.com/ach1992/simple-server-optimizer/releases/tag/v1.1.0), extract the complete source tree, and run `bash install.sh --local`. The `--online` channel follows the current `main` branch.
+> Stable release `v1.1.1` packages the post-v1.1.0 usability improvements while preserving the v1.1.0 safety baseline. For an exact immutable `v1.1.1` installation/update, use the Source ZIP or tarball from the [`v1.1.1` GitHub Release](https://github.com/ach1992/simple-server-optimizer/releases/tag/v1.1.1), extract the complete source tree, and run `bash install.sh --local`. The `--online` channel follows the current `main` branch.
 
 ---
 
@@ -364,18 +364,25 @@ On a server without internet/package-repository access, provide `ipset` through 
 
 Importing the bundled blocklist only updates SSO's saved list. It does **not** install firewall packages and does **not** activate SSO firewall rules. Use **Apply/refresh SSO firewall rules** explicitly after a usable backend is available.
 
-The published `v1.1.0` stabilization baseline includes:
+The published `v1.1.1` patch release preserves the v1.1.0 firewall safety baseline and adds the post-v1.1.0 usability improvements:
 
 - validating IPv4/CIDR list entries before apply;
-- rejecting invalid state clearly;
+- accepting one or many blacklist/whitelist IPv4/CIDR entries separated by commas and/or whitespace;
+- deduplicating input and validating the whole batch before mutation;
+- rejecting an invalid batch without partial persisted/runtime mutation;
+- protecting the required default whitelist entry `10.235.0.0/19` during bulk removal;
 - not reporting full success after required backend failures;
 - keeping whitelist priority over blocklist rules;
 - preserving the existing INPUT/OUTPUT policy scope;
 - making blacklist/whitelist add/remove update an already-active SSO nftables/ipset backend immediately;
 - keeping those list changes persisted;
-- using straightforward batching for larger lists.
+- showing compact requested/changed/unchanged/backend result summaries;
+- applying the common BitTorrent-port toggle immediately when SSO firewall is already active, with saved-state rollback if live apply fails;
+- never auto-enabling an inactive SSO firewall because of a direct list edit or BitTorrent toggle.
 
-SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface are intentionally outside the published `v1.1.0` scope.
+The explicit **Apply/refresh SSO firewall rules** action remains for initial activation, explicit refresh/recovery, and intentionally staged state.
+
+SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface remain outside the v1.1.1 scope.
 
 Common BitTorrent-port blocking is **best-effort port blocking**, not complete BitTorrent protocol detection.
 
@@ -406,7 +413,7 @@ SSO includes helpers for:
 
 These are practical helpers, not a claim that one fixed set of values is universally optimal for every server or every VPN/proxy workload.
 
-The published `v1.1.0` baseline focuses on correctness and persistence of existing behavior rather than adaptive tuning or protocol-specific profiles.
+The v1.1.0 stabilization baseline continues to define correctness and persistence expectations for these existing tuning features; v1.1.1 does not broaden them into adaptive tuning or protocol-specific profiles.
 
 ---
 
@@ -440,11 +447,23 @@ For important servers, a provider snapshot or console remains the best final saf
 
 ---
 
-# Published release baseline: v1.1.0
+# Current published release: v1.1.1
 
-`v1.1.0` is the current published **focused stabilization release**, not a major feature expansion.
+`v1.1.1` is a focused patch release that packages the post-v1.1.0 operator usability work from Issue #37 without expanding the underlying firewall policy surface.
 
-The delivered release includes:
+The v1.1.1 delta includes:
+
+- clearer inline input guidance and examples;
+- more consistent semantic color/status treatment across the CLI;
+- bulk blacklist/whitelist add/remove with comma/whitespace input, deduplication, and full-batch validation;
+- atomic rejection of invalid/protected whitelist removal batches;
+- immediate active-backend list application with compact result summaries and fail-closed rollback behavior;
+- immediate active-firewall BitTorrent common-port toggle application with rollback on live-apply failure;
+- preserving explicit Apply/refresh for activation/recovery/staged state;
+- no silent activation of an inactive firewall;
+- no new IPv6/FORWARD/DPI semantics.
+
+The v1.1.0 release remains the stabilization baseline that delivered:
 
 - preserving operator-owned Fail2Ban configuration;
 - journald-only SSH Fail2Ban support on supported hosts;
@@ -460,7 +479,7 @@ The delivered release includes:
 - focused CI/regression coverage;
 - completed real-server owner validation and published GitHub Release.
 
-Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.0**.
+Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.1**.
 
 Future work will be selected from reproduced defects, compatibility needs, real usage, and operator feedback rather than an automatic expansion roadmap.
 
