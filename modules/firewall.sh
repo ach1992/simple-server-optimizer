@@ -126,10 +126,13 @@ module_firewall_import_blocklist() {
   ok "Imported into: $STATE_BLOCKLIST"
   ok "Entries: $(wc -l < "$STATE_BLOCKLIST" | tr -d " ")"
 
-  if ! firewall_persist_enable; then
-    err "Blocklist was saved, but firewall persistence could not be enabled."
-    pause
-    return 0
+  local active_backend
+  active_backend="$(firewall_active_backend)"
+  if [[ "$active_backend" == "none" ]]; then
+    info "Import only changed saved SSO state; the firewall remains disabled until you choose Apply/refresh."
+  else
+    warn "SSO firewall is currently active using $active_backend. Saved state changed, but active rules were not replaced automatically."
+    info "Choose Apply/refresh SSO firewall rules to load the imported list into the active firewall."
   fi
 
   ok "Backup: $d"
@@ -468,7 +471,7 @@ firewall_list_change() {
 
 module_firewall_apply() {
   header
-  section "Apply blocklist (INPUT+OUTPUT default)"
+  section "Apply/refresh SSO firewall rules (INPUT+OUTPUT)"
 
   if ! ensure_default_whitelist || ! ensure_state_blocklist; then
     err "Firewall state validation failed. Nothing was applied."
@@ -654,9 +657,16 @@ module_firewall_whitelist_menu() {
 module_firewall_status() {
   header
   section "Firewall status"
-  local backend
-  backend="$(detect_firewall_backend)"
-  info "Backend: $backend"
+  local available_backend active_backend
+  available_backend="$(detect_firewall_backend)"
+  active_backend="$(firewall_active_backend)"
+
+  info "Available backend: $available_backend"
+  if [[ "$active_backend" == "none" ]]; then
+    info "SSO firewall: not active"
+  else
+    ok "SSO firewall: ACTIVE ($active_backend)"
+  fi
 
   if ! ensure_default_whitelist || ! ensure_state_blocklist; then
     err "Firewall state contains invalid data."
@@ -669,9 +679,9 @@ module_firewall_status() {
   info "Common BitTorrent-port block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
   echo ""
 
-  if [[ "$backend" == "nft" ]]; then
+  if [[ "$active_backend" == "nft" ]]; then
     nft list table inet sso 2>/dev/null | sed -n '1,120p' || true
-  elif [[ "$backend" == "ipset" ]]; then
+  elif [[ "$active_backend" == "ipset" ]]; then
     ipset list sso_block_v4 2>/dev/null | sed -n '1,40p' || true
     iptables -S SSO_IN 2>/dev/null || true
     iptables -S SSO_OUT 2>/dev/null || true
@@ -694,7 +704,10 @@ module_firewall_bittorrent_menu() {
     case "$choice" in
       1)
         rm -f "$STATE_BTFLAG" 2>/dev/null || true
-        ok "Common-port blocking disabled. Re-apply firewall to update active rules."
+        ok "Common-port blocking disabled in saved SSO state."
+        if [[ "$(firewall_active_backend)" != "none" ]]; then
+          info "SSO firewall is active; choose Apply/refresh to update the active rules."
+        fi
         ;;
       0) return ;;
       *) warn "Invalid choice." ;;
@@ -708,7 +721,12 @@ module_firewall_bittorrent_menu() {
     case "$choice" in
       1)
         : > "$STATE_BTFLAG"
-        ok "Common-port blocking enabled. Re-apply firewall to activate rules."
+        ok "Common-port blocking enabled in saved SSO state."
+        if [[ "$(firewall_active_backend)" != "none" ]]; then
+          info "SSO firewall is active; choose Apply/refresh to update the active rules."
+        else
+          info "Choose Apply/refresh when you want to activate SSO firewall rules."
+        fi
         ;;
       0) return ;;
       *) warn "Invalid choice." ;;

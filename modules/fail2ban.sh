@@ -142,6 +142,77 @@ fail2ban_apply_managed_config() {
   fail2ban_apply_service "$service_mode"
 }
 
+# Remove only SSO-owned Fail2Ban configuration. Do not stop, disable, enable,
+# or uninstall an operator-owned Fail2Ban service as a side effect.
+fail2ban_disable_managed_config() {
+  local previous="" had_previous=0 marker_was_present=0 was_active=0
+
+  if [[ -e "$F2B_SSO_LOCAL" || -L "$F2B_SSO_LOCAL" ]]; then
+    [[ -f "$F2B_SSO_LOCAL" && ! -L "$F2B_SSO_LOCAL" ]] || {
+      err "SSO Fail2Ban config is not a normal file; refusing to remove it: $F2B_SSO_LOCAL"
+      return 1
+    }
+    previous="$(mktemp "$F2B_JAIL_DIR/.sso.disable.previous.XXXXXX")" || return 1
+    cp -a "$F2B_SSO_LOCAL" "$previous" || { rm -f "$previous"; return 1; }
+    had_previous=1
+  fi
+
+  [[ -e "$F2B_NGINX_MARKER" || -L "$F2B_NGINX_MARKER" ]] && marker_was_present=1
+  systemctl is-active --quiet fail2ban 2>/dev/null && was_active=1
+
+  if ! rm -f -- "$F2B_SSO_LOCAL" "$F2B_NGINX_MARKER"; then
+    rm -f "$previous"
+    return 1
+  fi
+
+  if cmd_exists fail2ban-client; then
+    info "Validating remaining Fail2Ban configuration..."
+    if ! fail2ban_validate_config; then
+      err "Remaining Fail2Ban configuration is invalid; restoring SSO config."
+      if [[ "$had_previous" == "1" ]]; then
+        cp -a "$previous" "$F2B_SSO_LOCAL" || true
+      fi
+      if [[ "$marker_was_present" == "1" ]]; then
+        : > "$F2B_NGINX_MARKER" 2>/dev/null || true
+      fi
+      rm -f "$previous"
+      return 1
+    fi
+  elif [[ "$was_active" == "1" ]]; then
+    err "Fail2Ban is active but validation tooling is unavailable; SSO config was restored."
+    if [[ "$had_previous" == "1" ]]; then
+      cp -a "$previous" "$F2B_SSO_LOCAL" || true
+    fi
+    if [[ "$marker_was_present" == "1" ]]; then
+      : > "$F2B_NGINX_MARKER" 2>/dev/null || true
+    fi
+    rm -f "$previous"
+    return 1
+  fi
+
+  if [[ "$was_active" == "1" ]]; then
+    if ! run_step "Restarting active Fail2Ban without SSO config" systemctl restart fail2ban; then
+      err "Fail2Ban restart failed; restoring the previous SSO config."
+      if [[ "$had_previous" == "1" ]]; then
+        cp -a "$previous" "$F2B_SSO_LOCAL" || true
+      fi
+      if [[ "$marker_was_present" == "1" ]]; then
+        : > "$F2B_NGINX_MARKER" 2>/dev/null || true
+      fi
+      if cmd_exists fail2ban-client && fail2ban_validate_config >/dev/null 2>&1; then
+        systemctl restart fail2ban >/dev/null 2>&1 || true
+      fi
+      rm -f "$previous"
+      return 1
+    fi
+  else
+    info "Fail2Ban service is inactive; leaving its service state unchanged."
+  fi
+
+  rm -f "$previous"
+  return 0
+}
+
 module_fail2ban_install_ssh() {
   header
   section "Fail2Ban: install & enable (SSH)"
@@ -215,7 +286,11 @@ module_fail2ban_sync_whitelist() {
     return
   fi
 
-  ensure_default_whitelist
+  if ! ensure_default_whitelist; then
+    err "SSO whitelist is invalid or unavailable; Fail2Ban was not changed."
+    pause
+    return
+  fi
 
   local enable_nginx=0
   [[ -f "$F2B_NGINX_MARKER" ]] && enable_nginx=1
@@ -259,16 +334,31 @@ module_fail2ban_status() {
   pause
 }
 
-module_fail2ban_rollback() {
+module_fail2ban_disable() {
   header
-  section "Fail2Ban rollback"
-  warn "Use Backups & Rollback to restore the prior SSO-managed Fail2Ban state."
-  warn "This option only stops the Fail2Ban service; it does not rewrite operator configuration."
-  if ! run_step "Stopping Fail2Ban" systemctl stop fail2ban; then
-    err "Could not stop Fail2Ban."
+  section "Fail2Ban: remove SSO-managed configuration"
+  local d
+  d="$(backup_create "fail2ban:disable_sso_config")"
+
+  if [[ ! -e "$F2B_SSO_LOCAL" && ! -L "$F2B_SSO_LOCAL" \
+    && ! -e "$F2B_NGINX_MARKER" && ! -L "$F2B_NGINX_MARKER" ]]; then
+    info "No SSO-managed Fail2Ban configuration is currently present."
     pause
-    return
+    return 0
   fi
-  ok "Fail2Ban stopped."
+
+  if ! fail2ban_disable_managed_config; then
+    err "SSO Fail2Ban configuration could not be removed safely."
+    pause
+    return 0
+  fi
+
+  ok "SSO Fail2Ban configuration removed; package/service ownership was preserved. (Backup: $d)"
   pause
+}
+
+# Compatibility alias for older callers; behavior is now the safe SSO-only
+# disable operation instead of stopping the whole Fail2Ban service.
+module_fail2ban_rollback() {
+  module_fail2ban_disable
 }

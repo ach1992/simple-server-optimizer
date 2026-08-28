@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.0.0"
+SSO_VERSION="1.1.0"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
@@ -10,7 +10,7 @@ BACKUP_DIR_BASE="/root/simple-server-optimizer/backups"
 
 source "$MODULES_DIR/utils.sh"
 
-VERSION="${SSO_VERSION:-1.0.0}"
+VERSION="${SSO_VERSION:-1.1.0}"
 REPO_URL="https://github.com/ach1992/simple-server-optimizer"
 
 require_root
@@ -79,13 +79,13 @@ menu_firewall() {
   while true; do
     header
     section "Firewall / Blocklist / Whitelist"
-    echo "1) Import blocklist from assets -> state (dedupe)"
-    echo "2) Apply blocklist (DEFAULT: INPUT+OUTPUT)"
-    echo "3) Remove/Disable SSO firewall rules (rollback firewall only)"
+    echo "1) Import bundled blocklist into SSO state"
+    echo "2) Apply/refresh SSO firewall rules (INPUT+OUTPUT)"
+    echo "3) Disable/remove SSO firewall rules"
     echo "4) Blacklist manager (add/remove/show)"
     echo "5) Whitelist manager (add/remove/show)"
-    echo "6) Status (counts + active backend)"
-    echo "7) Block BitTorrent traffic (ports + common tracker ports)"
+    echo "6) Status (available + active backend)"
+    echo "7) Common BitTorrent-port blocking (best effort)"
     echo "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
@@ -110,7 +110,7 @@ menu_fail2ban() {
     echo "2) Enable nginx jail (if nginx detected)"
     echo "3) Sync whitelist into Fail2Ban ignoreip"
     echo "4) Status"
-    echo "5) Disable Fail2Ban changes (rollback f2b only)"
+    echo "5) Remove SSO Fail2Ban config (preserve service state)"
     echo "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
@@ -118,7 +118,7 @@ menu_fail2ban() {
       2) module_fail2ban_enable_nginx ;;
       3) module_fail2ban_sync_whitelist ;;
       4) module_fail2ban_status ;;
-      5) module_fail2ban_rollback ;;
+      5) module_fail2ban_disable ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac

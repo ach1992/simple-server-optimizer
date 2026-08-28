@@ -10,41 +10,55 @@ module_cpu_irq_enable_irqbalance() {
   local d
   d="$(backup_create "cpu_irq:irqbalance")"
 
-  run_step "Updating package index" apt-get update -y || true
+  run_step "Updating package index" apt-get update -y || warn "Package index update failed; trying with the current package cache."
   if ! dpkg -s irqbalance >/dev/null 2>&1; then
-    run_step "Installing irqbalance" apt-get install -y irqbalance || true
+    if ! run_step "Installing irqbalance" apt-get install -y irqbalance; then
+      err "Could not install irqbalance."
+      pause
+      return 0
+    fi
     if dpkg -s irqbalance >/dev/null 2>&1; then
       mkdir -p "$STATE_DIR" 2>/dev/null || true
       touch "$STATE_DIR/installed_irqbalance.marker" 2>/dev/null || true
     fi
   fi
-  run_step "Enabling irqbalance service" systemctl enable --now irqbalance || true
+
+  if ! run_step "Enabling irqbalance service" systemctl enable --now irqbalance; then
+    warn "Could not enable/start irqbalance."
+  fi
 
   if systemctl is-active irqbalance >/dev/null 2>&1; then
     ok "irqbalance is active. (Backup: $d)"
   else
-    warn "irqbalance may not be active on this system."
+    warn "irqbalance is not active. Check systemctl status irqbalance. (Backup: $d)"
   fi
   pause
 }
 
+# Render an all-CPU Linux cpumask without depending on Python or another
+# non-shell helper. Each comma-separated group represents up to 32 CPUs.
 hex_mask_all_cpus() {
-  local n="$1"
-  python3 - "$n" <<'PY'
-import sys
+  local n="${1:-}"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  (( n >= 1 )) || return 1
 
-n = int(sys.argv[1])
-if n < 1:
-    raise SystemExit(1)
+  local full_groups=$((n / 32))
+  local remainder=$((n % 32))
+  local i partial
+  local -a parts=()
 
-value = (1 << n) - 1
-parts = []
-while value:
-    parts.append(f"{value & 0xffffffff:08x}")
-    value >>= 32
-parts[-1] = parts[-1].lstrip("0") or "0"
-print(",".join(reversed(parts)))
-PY
+  if (( remainder > 0 )); then
+    partial=$(( (1 << remainder) - 1 ))
+    printf -v partial '%x' "$partial"
+    parts+=("$partial")
+  fi
+
+  for ((i = 0; i < full_groups; i++)); do
+    parts+=("ffffffff")
+  done
+
+  local IFS=,
+  printf '%s\n' "${parts[*]}"
 }
 
 module_cpu_irq_apply_rps() {
@@ -56,13 +70,22 @@ module_cpu_irq_apply_rps() {
   local nic cpus mask
   nic="$(detect_nic)"
   cpus="$(nproc)"
-  mask="$(hex_mask_all_cpus "$cpus")"
+  if ! mask="$(hex_mask_all_cpus "$cpus")"; then
+    err "Could not calculate a CPU mask for $cpus CPUs."
+    pause
+    return 0
+  fi
 
   info "NIC: $nic | CPUs: $cpus | Mask: $mask"
 
+  local runtime_failed=0 persistence_failed=0
+
   printf '# SSO: RPS/RFS global settings\nnet.core.rps_sock_flow_entries=%s\n' \
     "$RPS_SOCK_FLOW_ENTRIES" > /etc/sysctl.d/99-sso-rps.conf
-  run_step "Applying sysctl settings" sysctl --system || warn "sysctl apply had errors (continuing)."
+  if ! run_step "Applying sysctl settings" sysctl --system; then
+    runtime_failed=1
+    warn "sysctl reported errors; some global runtime settings may not have been applied."
+  fi
 
   ensure_dirs /usr/local/sbin
   cat > /usr/local/sbin/sso-cpuirq-restore <<'EOS'
@@ -72,35 +95,19 @@ STATE_DIR="/etc/sso"
 INSTALL_DIR="$(cat "$STATE_DIR/install_dir" 2>/dev/null || echo "/root/simple-server-optimizer")"
 # shellcheck source=/dev/null
 source "$INSTALL_DIR/modules/utils.sh"
-
-RPS_SOCK_FLOW_ENTRIES=65536
-RPS_FLOW_CNT=16384
-
-hex_mask_all_cpus() {
-  local n="$1"
-  python3 - "$n" <<'PY'
-import sys
-
-n = int(sys.argv[1])
-if n < 1:
-    raise SystemExit(1)
-
-value = (1 << n) - 1
-parts = []
-while value:
-    parts.append(f"{value & 0xffffffff:08x}")
-    value >>= 32
-parts[-1] = parts[-1].lstrip("0") or "0"
-print(",".join(reversed(parts)))
-PY
-}
+# shellcheck source=/dev/null
+source "$INSTALL_DIR/modules/cpu_irq.sh"
 
 nic="$(detect_nic)"
 cpus="$(nproc)"
 mask="$(hex_mask_all_cpus "$cpus")"
 queue_failed=false
+global_failed=false
 
-run_step "Setting rps_sock_flow_entries" sysctl -w "net.core.rps_sock_flow_entries=$RPS_SOCK_FLOW_ENTRIES" || warn "Could not set rps_sock_flow_entries (continuing)."
+run_step "Setting rps_sock_flow_entries" sysctl -w "net.core.rps_sock_flow_entries=$RPS_SOCK_FLOW_ENTRIES" || {
+  warn "Could not set rps_sock_flow_entries."
+  global_failed=true
+}
 
 rps_any=false
 rps_failed=false
@@ -142,11 +149,16 @@ done
 [[ "$rfs_failed" == false ]] || warn "RFS: one or more queue writes were rejected."
 [[ "$xps_failed" == false ]] || warn "XPS: one or more queue writes were rejected by the kernel/driver."
 
-if [[ "$queue_failed" == true ]]; then
-  warn "CPU queue restore was only partially applied; supported settings were kept."
+if [[ "$queue_failed" == true || "$global_failed" == true ]]; then
+  warn "CPU queue restore was only partially applied."
+  exit 1
 fi
 EOS
-  chmod +x /usr/local/sbin/sso-cpuirq-restore
+
+  if ! chmod 755 /usr/local/sbin/sso-cpuirq-restore; then
+    persistence_failed=1
+    warn "Could not make the CPU/IRQ restore helper executable."
+  fi
 
   cat > /etc/systemd/system/sso-cpuirq.service <<'EOF_UNIT'
 [Unit]
@@ -163,10 +175,19 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF_UNIT
 
-  run_step "Reloading systemd units" systemctl daemon-reload || warn "systemd daemon-reload failed (continuing)."
-  run_step "Enabling SSO CPU/IRQ service" systemctl enable --now sso-cpuirq.service || warn "Could not enable sso-cpuirq.service (continuing)."
+  if ! run_step "Reloading systemd units" systemctl daemon-reload; then
+    persistence_failed=1
+    warn "systemd daemon-reload failed."
+  fi
+  if ! run_step "Enabling SSO CPU/IRQ service" systemctl enable --now sso-cpuirq.service; then
+    persistence_failed=1
+    warn "Could not enable sso-cpuirq.service; reboot persistence is not confirmed."
+  fi
 
-  run_step "Setting rps_sock_flow_entries" sysctl -w "net.core.rps_sock_flow_entries=$RPS_SOCK_FLOW_ENTRIES" || warn "Could not set rps_sock_flow_entries (continuing)."
+  if ! run_step "Setting rps_sock_flow_entries" sysctl -w "net.core.rps_sock_flow_entries=$RPS_SOCK_FLOW_ENTRIES"; then
+    runtime_failed=1
+    warn "Could not set rps_sock_flow_entries."
+  fi
 
   info "Applying per-queue RPS/RFS/XPS settings..."
 
@@ -227,10 +248,10 @@ EOF_UNIT
     ok "XPS: applied successfully."
   fi
 
-  if [[ "$queue_failed" == true ]]; then
-    warn "RPS/RFS/XPS was only partially applied; supported settings were kept. (Backup: $d)"
+  if [[ "$queue_failed" == true || "$runtime_failed" -ne 0 || "$persistence_failed" -ne 0 ]]; then
+    warn "RPS/RFS/XPS finished with warnings; runtime and/or reboot persistence is only partially confirmed. (Backup: $d)"
   else
-    ok "Applied supported RPS/RFS/XPS settings. (Backup: $d)"
+    ok "Applied supported RPS/RFS/XPS settings with reboot persistence. (Backup: $d)"
   fi
   module_cpu_irq_show
 }
