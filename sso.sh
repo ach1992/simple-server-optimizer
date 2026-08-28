@@ -41,10 +41,10 @@ menu_network() {
   while true; do
     header
     section "Network Optimizations"
-    echo "1) Enable fq + BBR (safe, auto-detect)"
-    echo "2) Apply safe TCP tuning (backlog/timewait/keepalive)"
-    echo "3) Show current tuning"
-    echo "0) Back"
+    menu_item "1) Enable fq + BBR (safe, auto-detect)"
+    menu_item "2) Apply safe TCP tuning (backlog/timewait/keepalive)"
+    menu_item "3) Show current tuning"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) module_network_enable_fq_bbr ;;
@@ -60,10 +60,10 @@ menu_cpu_irq() {
   while true; do
     header
     section "CPU & IRQ Optimizations"
-    echo "1) Install & enable irqbalance"
-    echo "2) Apply RPS/RFS/XPS (auto NIC)"
-    echo "3) Show current IRQ/RPS status"
-    echo "0) Back"
+    menu_item "1) Install & enable irqbalance"
+    menu_item "2) Apply RPS/RFS/XPS (auto NIC)"
+    menu_item "3) Show current IRQ/RPS status"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) module_cpu_irq_enable_irqbalance ;;
@@ -79,14 +79,14 @@ menu_firewall() {
   while true; do
     header
     section "Firewall / Blocklist / Whitelist"
-    echo "1) Import bundled blocklist into SSO state"
-    echo "2) Apply/refresh SSO firewall rules (INPUT+OUTPUT)"
-    echo "3) Disable/remove SSO firewall rules"
-    echo "4) Blacklist manager (add/remove/show)"
-    echo "5) Whitelist manager (add/remove/show)"
-    echo "6) Status (available + active backend)"
-    echo "7) Common BitTorrent-port blocking (best effort)"
-    echo "0) Back"
+    menu_item "1) Import bundled blocklist into SSO state"
+    menu_warn "2) Apply/refresh SSO firewall rules (INPUT+OUTPUT)"
+    menu_warn "3) Disable/remove SSO firewall rules"
+    menu_item "4) Blacklist manager (add/remove/show)"
+    menu_item "5) Whitelist manager (add/remove/show)"
+    menu_item "6) Status (available + active backend)"
+    menu_item "7) Common BitTorrent-port blocking (best effort)"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) module_firewall_import_blocklist ;;
@@ -106,12 +106,12 @@ menu_fail2ban() {
   while true; do
     header
     section "Fail2Ban"
-    echo "1) Install & enable Fail2Ban (SSH default)"
-    echo "2) Enable nginx jail (if nginx detected)"
-    echo "3) Sync whitelist into Fail2Ban ignoreip"
-    echo "4) Status"
-    echo "5) Remove SSO Fail2Ban config (preserve service state)"
-    echo "0) Back"
+    menu_item "1) Install & enable Fail2Ban (SSH default)"
+    menu_item "2) Enable nginx jail (if nginx detected)"
+    menu_item "3) Sync whitelist into Fail2Ban ignoreip"
+    menu_item "4) Status"
+    menu_warn "5) Remove SSO Fail2Ban config (preserve service state)"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) module_fail2ban_install_ssh ;;
@@ -129,10 +129,10 @@ menu_backups() {
   while true; do
     header
     section "Backups & Rollback"
-    echo "1) List backups"
-    echo "2) Rollback last backup"
-    echo "3) Rollback choose backup"
-    echo "0) Back"
+    menu_item "1) List backups"
+    menu_warn "2) Rollback last backup"
+    menu_warn "3) Rollback choose backup"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) module_rollback_list ;;
@@ -148,8 +148,8 @@ menu_update() {
   while true; do
     header
     section "Update SSO"
-    echo "1) Update/reinstall from online source"
-    echo "0) Back"
+    menu_warn "1) Update/reinstall from online source"
+    menu_secondary "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
@@ -177,15 +177,15 @@ menu_update() {
 main_menu() {
   while true; do
     header
-    echo "1) System Check"
-    echo "2) Network Optimizations"
-    echo "3) CPU & IRQ Optimizations"
-    echo "4) Firewall + Abuse Defender"
-    echo "5) Fail2Ban"
-    echo "6) Backups & Rollback"
-    echo "7) Update"
-    echo "8) Uninstall (rollback + remove SSO)"
-    echo "0) Exit"
+    menu_item "1) System Check"
+    menu_item "2) Network Optimizations"
+    menu_item "3) CPU & IRQ Optimizations"
+    menu_item "4) Firewall + Abuse Defender"
+    menu_item "5) Fail2Ban"
+    menu_item "6) Backups & Rollback"
+    menu_item "7) Update"
+    menu_warn "8) Uninstall (rollback + remove SSO)"
+    menu_secondary "0) Exit"
     prompt_choice "Select an option" choice
     case "$choice" in
       1) system_check ;;

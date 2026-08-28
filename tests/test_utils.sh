@@ -50,7 +50,34 @@ test_ensure_dirs_does_not_clobber_caller_d() {
   return "$rc"
 }
 
+
+test_semantic_menu_helpers_preserve_plain_text_and_success() {
+  local output
+  local saved_c_reset="$c_reset" saved_c_bold="$c_bold" saved_c_dim="$c_dim"
+  local saved_c_grn="$c_grn" saved_c_ylw="$c_ylw" saved_c_cyn="$c_cyn" saved_c_mag="$c_mag"
+
+  c_reset=""; c_bold=""; c_dim=""; c_grn=""; c_ylw=""; c_cyn=""; c_mag=""
+  output="$({
+    menu_item '1) Normal action'
+    menu_warn '2) High-impact action'
+    menu_secondary '0) Back'
+    status_active 'Feature: ACTIVE'
+    status_inactive 'Feature: inactive'
+    section 'Section title'
+  })" || return 1
+
+  c_reset="$saved_c_reset"; c_bold="$saved_c_bold"; c_dim="$saved_c_dim"
+  c_grn="$saved_c_grn"; c_ylw="$saved_c_ylw"; c_cyn="$saved_c_cyn"; c_mag="$saved_c_mag"
+
+  printf '%s\n' "$output" | grep -Fqx '1) Normal action' || return 1
+  printf '%s\n' "$output" | grep -Fqx '2) High-impact action' || return 1
+  printf '%s\n' "$output" | grep -Fqx '0) Back' || return 1
+  printf '%s\n' "$output" | grep -Fqx 'Feature: ACTIVE' || return 1
+  printf '%s\n' "$output" | grep -Fqx 'Feature: inactive' || return 1
+  printf '%s\n' "$output" | grep -Fqx 'Section title' || return 1
+}
 run_test "prompt_choice writes to the caller-provided variable" test_prompt_choice_writes_named_output
 run_test "IPv4/CIDR validator rejects malformed values" test_validate_ipv4_helpers
 run_test "ensure_dirs does not overwrite a caller's local d variable" test_ensure_dirs_does_not_clobber_caller_d
+run_test "semantic menu helpers preserve plain text and success return codes" test_semantic_menu_helpers_preserve_plain_text_and_success
 finish_tests

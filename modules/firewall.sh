@@ -359,12 +359,68 @@ ipset_apply() {
   ok "Applied iptables+ipset backend (INPUT+OUTPUT)."
 }
 
-firewall_runtime_set_change() {
+firewall_backend_label() {
+  case "${1:-none}" in
+    nft) printf '%s\n' "nftables" ;;
+    ipset) printf '%s\n' "iptables+ipset" ;;
+    none) printf '%s\n' "inactive" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+firewall_parse_entries() {
+  local raw="${1:-}"
+  local -n __valid="$2"
+  local -n __invalid="$3"
+  local -n __duplicate_count="$4"
+  local normalized token
+  local -a tokens=()
+  local -A seen=()
+
+  __valid=()
+  __invalid=()
+  __duplicate_count=0
+  normalized="${raw//,/ }"
+  read -r -a tokens <<<"$normalized"
+
+  for token in "${tokens[@]}"; do
+    [[ -n "$token" ]] || continue
+    if [[ -n "${seen[$token]+x}" ]]; then
+      __duplicate_count=$((__duplicate_count + 1))
+      continue
+    fi
+    seen["$token"]=1
+
+    if validate_ipv4_or_cidr "$token"; then
+      __valid+=("$token")
+    else
+      __invalid+=("$token")
+    fi
+  done
+}
+
+firewall_runtime_mutate_entry() {
+  local backend="$1"
+  local set_name="$2"
+  local action="$3"
+  local entry="$4"
+
+  case "$backend:$action" in
+    nft:add) nft "add element inet sso $set_name { $entry }" >/dev/null 2>&1 ;;
+    nft:remove) nft "delete element inet sso $set_name { $entry }" >/dev/null 2>&1 ;;
+    ipset:add) ipset add "$set_name" "$entry" >/dev/null 2>&1 ;;
+    ipset:remove) ipset del "$set_name" "$entry" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+firewall_runtime_set_change_batch() {
   local backend="$1"
   local list_kind="$2"
   local action="$3"
-  local entry="$4"
-  local set_name
+  shift 3
+  local -a changed=("$@") applied=()
+  local set_name entry elements opposite i rollback_failed=0
 
   case "$list_kind" in
     block) set_name="$SSO_SET_BLOCK" ;;
@@ -372,40 +428,113 @@ firewall_runtime_set_change() {
     *) return 1 ;;
   esac
 
-  case "$backend" in
-    nft)
-      if nft "get element inet sso $set_name { $entry }" >/dev/null 2>&1; then
-        [[ "$action" == "add" ]] && return 0
-        nft "delete element inet sso $set_name { $entry }" >/dev/null 2>&1
-      else
-        [[ "$action" == "remove" ]] && return 0
-        nft "add element inet sso $set_name { $entry }" >/dev/null 2>&1
-      fi
-      ;;
-    ipset)
-      if ipset test "$set_name" "$entry" >/dev/null 2>&1; then
-        [[ "$action" == "add" ]] && return 0
-        ipset del "$set_name" "$entry" >/dev/null 2>&1
-      else
-        [[ "$action" == "remove" ]] && return 0
-        ipset add "$set_name" "$entry" >/dev/null 2>&1
-      fi
-      ;;
-    none) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ "$action" == "add" || "$action" == "remove" ]] || return 1
+  [[ "$backend" == "nft" || "$backend" == "ipset" ]] || return 1
+  ((${#changed[@]} > 0)) || return 0
+
+  # The caller computes changes from validated persisted state. Do not hide
+  # runtime drift with an existence probe: an unexpected add/delete failure is
+  # treated as a live-update failure so persisted state can be restored.
+  if [[ "$backend" == "nft" ]]; then
+    elements="$(IFS=,; printf '%s' "${changed[*]}")"
+    case "$action" in
+      add) nft "add element inet sso $set_name { $elements }" >/dev/null 2>&1 ;;
+      remove) nft "delete element inet sso $set_name { $elements }" >/dev/null 2>&1 ;;
+    esac
+    return $?
+  fi
+
+  opposite="remove"
+  [[ "$action" == "remove" ]] && opposite="add"
+  for entry in "${changed[@]}"; do
+    if firewall_runtime_mutate_entry "$backend" "$set_name" "$action" "$entry"; then
+      applied+=("$entry")
+      continue
+    fi
+
+    for ((i=${#applied[@]} - 1; i>=0; i--)); do
+      firewall_runtime_mutate_entry "$backend" "$set_name" "$opposite" "${applied[$i]}" || rollback_failed=1
+    done
+    [[ "$rollback_failed" -eq 0 ]] && return 1
+    return 2
+  done
+  return 0
+}
+
+firewall_runtime_set_change() {
+  firewall_runtime_set_change_batch "$1" "$2" "$3" "$4"
+}
+
+firewall_read_entries() {
+  local purpose="$1"
+  local out_name="$2"
+  local backend label
+
+  info "Enter one or more IPv4 addresses/CIDRs to $purpose."
+  muted "Examples: 203.0.113.10  |  203.0.113.0/24"
+  muted "Multiple: 203.0.113.10, 198.51.100.0/24 192.0.2.5 (comma and/or spaces)"
+
+  backend="$(firewall_active_backend)"
+  if [[ "$backend" == "none" ]]; then
+    info "Accepted changes are saved only; the inactive SSO firewall will not be enabled."
+  else
+    label="$(firewall_backend_label "$backend")"
+    info "Accepted changes are saved and applied immediately to the active $label backend."
+  fi
+
+  read_input "Entries: " "$out_name"
+}
+
+firewall_report_batch_summary() {
+  local action="$1"
+  local requested="$2"
+  local changed="$3"
+  local unchanged="$4"
+  local duplicates="$5"
+  local backend="$6"
+  local label
+
+  info "Requested: $requested"
+  if [[ "$action" == "add" ]]; then
+    ok "Added: $changed"
+    info "Already present: $unchanged"
+  else
+    ok "Removed: $changed"
+    info "Not present: $unchanged"
+  fi
+  ((duplicates > 0)) && info "Duplicates ignored: $duplicates"
+
+  if [[ "$backend" == "none" ]]; then
+    info "Applied now: no (SSO firewall inactive)"
+  else
+    label="$(firewall_backend_label "$backend")"
+    if ((changed > 0)); then
+      ok "Applied now: yes ($label)"
+    else
+      info "Applied now: no changes needed ($label active)"
+    fi
+  fi
 }
 
 firewall_list_change() {
   local list_kind="$1"
   local action="$2"
-  local entry="$3"
-  local file backend previous candidate
+  local raw="${3:-}"
+  local file backend previous candidate entry runtime_rc=0
+  local duplicates=0 requested=0 changed_count=0 unchanged_count=0
+  local -a entries=() invalid=() effective=()
 
-  validate_ipv4_or_cidr "$entry" || {
-    err "Invalid IPv4 or CIDR: $entry"
+  firewall_parse_entries "$raw" entries invalid duplicates
+  if ((${#invalid[@]} > 0)); then
+    err "Invalid IPv4/CIDR entries: ${invalid[*]}"
+    info "Valid examples: 203.0.113.10 or 203.0.113.0/24; separate multiple entries with commas and/or spaces."
     return 1
-  }
+  fi
+  if ((${#entries[@]} == 0)); then
+    err "No IPv4/CIDR entries were provided."
+    info "Enter at least one value such as 203.0.113.10 or 203.0.113.0/24."
+    return 1
+  fi
 
   case "$list_kind" in
     block)
@@ -415,58 +544,153 @@ firewall_list_change() {
     white)
       ensure_default_whitelist || return 1
       file="$STATE_WHITELIST"
-      if [[ "$action" == "remove" && "$entry" == "10.235.0.0/19" ]]; then
-        err "10.235.0.0/19 is the required default whitelist entry and cannot be removed here."
-        return 1
+      if [[ "$action" == "remove" ]]; then
+        for entry in "${entries[@]}"; do
+          if [[ "$entry" == "10.235.0.0/19" ]]; then
+            err "Batch rejected: 10.235.0.0/19 is the required default whitelist entry and cannot be removed."
+            info "No whitelist entries from this batch were changed."
+            return 1
+          fi
+        done
       fi
       ;;
     *) return 1 ;;
   esac
 
+  requested=${#entries[@]}
+  case "$action" in
+    add)
+      for entry in "${entries[@]}"; do
+        if grep -qxF -- "$entry" "$file" 2>/dev/null; then
+          unchanged_count=$((unchanged_count + 1))
+        else
+          effective+=("$entry")
+        fi
+      done
+      ;;
+    remove)
+      for entry in "${entries[@]}"; do
+        if grep -qxF -- "$entry" "$file" 2>/dev/null; then
+          effective+=("$entry")
+        else
+          unchanged_count=$((unchanged_count + 1))
+        fi
+      done
+      ;;
+    *) return 1 ;;
+  esac
+  changed_count=${#effective[@]}
+
+  backend="$(firewall_active_backend)"
+  if ((changed_count == 0)); then
+    firewall_report_batch_summary "$action" "$requested" 0 "$unchanged_count" "$duplicates" "$backend"
+    return 0
+  fi
+
   previous="$(mktemp)" || return 1
   candidate="$(mktemp)" || { rm -f -- "$previous"; return 1; }
   cp -a -- "$file" "$previous" || { rm -f -- "$previous" "$candidate"; return 1; }
+  cp -a -- "$file" "$candidate" || { rm -f -- "$previous" "$candidate"; return 1; }
 
   case "$action" in
     add)
-      cat -- "$file" > "$candidate" || true
-      printf '%s\n' "$entry" >> "$candidate"
+      printf '%s\n' "${effective[@]}" >> "$candidate"
       ;;
     remove)
-      grep -vxF "$entry" "$file" > "$candidate" || true
-      ;;
-    *)
-      rm -f -- "$previous" "$candidate"
-      return 1
+      for entry in "${effective[@]}"; do
+        grep -vxF -- "$entry" "$candidate" > "${candidate}.next" || true
+        mv -- "${candidate}.next" "$candidate" || {
+          rm -f -- "$previous" "$candidate" "${candidate}.next"
+          return 1
+        }
+      done
       ;;
   esac
 
   if ! normalize_iplist_source "$candidate" "$file" "$list_kind list"; then
     cp -a -- "$previous" "$file" 2>/dev/null || true
-    rm -f -- "$previous" "$candidate"
+    rm -f -- "$previous" "$candidate" "${candidate}.next"
     return 1
   fi
 
   if [[ "$list_kind" == "white" ]] && ! ensure_default_whitelist; then
     cp -a -- "$previous" "$file" 2>/dev/null || true
-    rm -f -- "$previous" "$candidate"
+    rm -f -- "$previous" "$candidate" "${candidate}.next"
+    return 1
+  fi
+
+  if [[ "$backend" != "none" ]]; then
+    firewall_runtime_set_change_batch "$backend" "$list_kind" "$action" "${effective[@]}" || runtime_rc=$?
+    if [[ "$runtime_rc" -ne 0 ]]; then
+      cp -a -- "$previous" "$file" 2>/dev/null || true
+      if [[ "$runtime_rc" -eq 2 ]]; then
+        err "Runtime firewall update failed and its compensating rollback also failed."
+        err "The saved list was restored, but active $backend state may need explicit Apply/refresh after the backend issue is fixed."
+      else
+        err "Runtime firewall update failed; the saved list was restored and the batch was not accepted."
+      fi
+      rm -f -- "$previous" "$candidate" "${candidate}.next"
+      return 1
+    fi
+  fi
+
+  ok "Saved state: updated"
+  firewall_report_batch_summary "$action" "$requested" "$changed_count" "$unchanged_count" "$duplicates" "$backend"
+  rm -f -- "$previous" "$candidate" "${candidate}.next"
+}
+
+firewall_apply_active_backend() {
+  case "$1" in
+    nft) nft_apply ;;
+    ipset) ipset_apply ;;
+    *) return 1 ;;
+  esac
+}
+
+firewall_set_bittorrent_state() {
+  local desired="$1"
+  local backend previous=0 rollback_failed=0
+
+  [[ -f "$STATE_BTFLAG" ]] && previous=1
+  if [[ "$desired" == "enabled" ]]; then
+    : > "$STATE_BTFLAG" || return 1
+  elif [[ "$desired" == "disabled" ]]; then
+    rm -f -- "$STATE_BTFLAG" || return 1
+  else
     return 1
   fi
 
   backend="$(firewall_active_backend)"
-  if [[ "$backend" != "none" ]]; then
-    if ! firewall_runtime_set_change "$backend" "$list_kind" "$action" "$entry"; then
-      cp -a -- "$previous" "$file" 2>/dev/null || true
-      err "Runtime firewall update failed; the saved list was restored."
-      rm -f -- "$previous" "$candidate"
-      return 1
-    fi
-    ok "Saved and applied immediately using $backend."
-  else
-    ok "Saved. SSO firewall is not currently active, so no runtime update was needed."
+  if [[ "$backend" == "none" ]]; then
+    ok "Common-port blocking $desired in saved SSO state."
+    info "SSO firewall is inactive; it was not enabled. This setting will take effect when SSO firewall rules are activated."
+    return 0
   fi
 
-  rm -f -- "$previous" "$candidate"
+  if firewall_apply_active_backend "$backend"; then
+    ok "Common-port blocking $desired, saved and applied immediately using $(firewall_backend_label "$backend")."
+    return 0
+  fi
+
+  if [[ "$previous" -eq 1 ]]; then
+    : > "$STATE_BTFLAG" || rollback_failed=1
+  else
+    rm -f -- "$STATE_BTFLAG" || rollback_failed=1
+  fi
+
+  if [[ "$rollback_failed" -ne 0 ]]; then
+    err "Live firewall update failed, and the previous saved toggle could not be restored."
+    err "Inspect $STATE_BTFLAG and active rules before retrying."
+    return 1
+  fi
+
+  if firewall_apply_active_backend "$backend"; then
+    err "Live firewall update failed; the previous saved toggle and active rules were restored."
+  else
+    err "Live firewall update failed; the previous saved toggle was restored, but active firewall rollback could not be verified."
+    err "Fix the backend problem, then use Apply/refresh SSO firewall rules to reconcile active state."
+  fi
+  return 1
 }
 
 module_firewall_apply() {
@@ -569,12 +793,12 @@ module_firewall_blacklist_menu() {
   while true; do
     header
     section "Blacklist manager"
-    echo "Blacklist file: $STATE_BLOCKLIST"
-    echo "1) Show blacklist"
-    echo "2) Add IP/CIDR"
-    echo "3) Remove IP/CIDR"
-    echo "0) Back"
-    local choice ip
+    muted "Blacklist file: $STATE_BLOCKLIST"
+    menu_item "1) Show blacklist"
+    menu_item "2) Add one or more IPv4/CIDRs"
+    menu_item "3) Remove one or more IPv4/CIDRs"
+    menu_secondary "0) Back"
+    local choice entries_raw
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
@@ -588,19 +812,21 @@ module_firewall_blacklist_menu() {
         pause
         ;;
       2)
-        read_input "Enter IP/CIDR to blacklist: " ip || { warn "No input received."; pause; continue; }
-        ip="${ip//[[:space:]]/}"
-        if firewall_list_change block add "$ip"; then
-          ok "Blacklist updated: $STATE_BLOCKLIST"
+        if ! firewall_read_entries "add to the blacklist" entries_raw; then
+          warn "No input received; blacklist was not changed."
+          pause
+          continue
         fi
+        firewall_list_change block add "$entries_raw" || true
         pause
         ;;
       3)
-        read_input "Enter IP/CIDR to remove: " ip || { warn "No input received."; pause; continue; }
-        ip="${ip//[[:space:]]/}"
-        if firewall_list_change block remove "$ip"; then
-          ok "Blacklist updated: $STATE_BLOCKLIST"
+        if ! firewall_read_entries "remove from the blacklist" entries_raw; then
+          warn "No input received; blacklist was not changed."
+          pause
+          continue
         fi
+        firewall_list_change block remove "$entries_raw" || true
         pause
         ;;
       0) return ;;
@@ -614,12 +840,12 @@ module_firewall_whitelist_menu() {
   while true; do
     header
     section "Whitelist manager"
-    echo "Whitelist file: $STATE_WHITELIST"
-    echo "1) Show whitelist"
-    echo "2) Add IP/CIDR"
-    echo "3) Remove IP/CIDR"
-    echo "0) Back"
-    local choice ip
+    muted "Whitelist file: $STATE_WHITELIST"
+    menu_item "1) Show whitelist"
+    menu_item "2) Add one or more IPv4/CIDRs"
+    menu_warn "3) Remove one or more IPv4/CIDRs"
+    menu_secondary "0) Back"
+    local choice entries_raw
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
@@ -633,19 +859,22 @@ module_firewall_whitelist_menu() {
         pause
         ;;
       2)
-        read_input "Enter IP/CIDR to whitelist: " ip || { warn "No input received."; pause; continue; }
-        ip="${ip//[[:space:]]/}"
-        if firewall_list_change white add "$ip"; then
-          ok "Whitelist updated: $STATE_WHITELIST"
+        if ! firewall_read_entries "add to the whitelist" entries_raw; then
+          warn "No input received; whitelist was not changed."
+          pause
+          continue
         fi
+        firewall_list_change white add "$entries_raw" || true
         pause
         ;;
       3)
-        read_input "Enter IP/CIDR to remove: " ip || { warn "No input received."; pause; continue; }
-        ip="${ip//[[:space:]]/}"
-        if firewall_list_change white remove "$ip"; then
-          ok "Whitelist updated: $STATE_WHITELIST"
+        warn "The required default whitelist entry 10.235.0.0/19 cannot be removed."
+        if ! firewall_read_entries "remove from the whitelist" entries_raw; then
+          warn "No input received; whitelist was not changed."
+          pause
+          continue
         fi
+        firewall_list_change white remove "$entries_raw" || true
         pause
         ;;
       0) return ;;
@@ -663,9 +892,9 @@ module_firewall_status() {
 
   info "Available backend: $available_backend"
   if [[ "$active_backend" == "none" ]]; then
-    info "SSO firewall: not active"
+    status_inactive "SSO firewall: not active"
   else
-    ok "SSO firewall: ACTIVE ($active_backend)"
+    status_active "SSO firewall: ACTIVE ($(firewall_backend_label "$active_backend"))"
   fi
 
   if ! ensure_default_whitelist || ! ensure_state_blocklist; then
@@ -676,7 +905,11 @@ module_firewall_status() {
 
   info "Blocklist entries: $(wc -l < "$STATE_BLOCKLIST" | tr -d " ")"
   info "Whitelist entries: $(wc -l < "$STATE_WHITELIST" | tr -d " ")"
-  info "Common BitTorrent-port block: $( [[ -f "$STATE_BTFLAG" ]] && echo "ENABLED" || echo "disabled" )"
+  if [[ -f "$STATE_BTFLAG" ]]; then
+    status_active "Common BitTorrent-port block: ENABLED"
+  else
+    status_inactive "Common BitTorrent-port block: disabled"
+  fi
   echo ""
 
   if [[ "$active_backend" == "nft" ]]; then
@@ -696,38 +929,24 @@ module_firewall_bittorrent_menu() {
   warn "This blocks common BitTorrent-related ports only; it is not complete protocol detection."
 
   if [[ -f "$STATE_BTFLAG" ]]; then
-    info "Common-port blocking is ENABLED."
-    echo "1) Disable common-port blocking"
-    echo "0) Back"
+    status_active "Common-port blocking is ENABLED."
+    menu_warn "1) Disable common-port blocking"
+    menu_secondary "0) Back"
     local choice
     prompt_choice "Select an option" choice
     case "$choice" in
-      1)
-        rm -f "$STATE_BTFLAG" 2>/dev/null || true
-        ok "Common-port blocking disabled in saved SSO state."
-        if [[ "$(firewall_active_backend)" != "none" ]]; then
-          info "SSO firewall is active; choose Apply/refresh to update the active rules."
-        fi
-        ;;
+      1) firewall_set_bittorrent_state disabled || true ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
   else
-    info "Common-port blocking is disabled."
-    echo "1) Enable common-port blocking"
-    echo "0) Back"
+    status_inactive "Common-port blocking is disabled."
+    menu_warn "1) Enable common-port blocking"
+    menu_secondary "0) Back"
     local choice
     prompt_choice "Select an option" choice
     case "$choice" in
-      1)
-        : > "$STATE_BTFLAG"
-        ok "Common-port blocking enabled in saved SSO state."
-        if [[ "$(firewall_active_backend)" != "none" ]]; then
-          info "SSO firewall is active; choose Apply/refresh to update the active rules."
-        else
-          info "Choose Apply/refresh when you want to activate SSO firewall rules."
-        fi
-        ;;
+      1) firewall_set_bittorrent_state enabled || true ;;
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
