@@ -1,175 +1,130 @@
 # Simple Server Optimizer — Project Specification
 
-This file is the **bootstrap source-of-intent** for **Simple Server Optimizer (SSO)**. Its job is to establish the durable project direction from which repository documentation, architecture rules, GitHub Issues, release work, and operating instructions are derived.
-
-It is **not** the normal recovery source for future Master sessions. After bootstrap is complete, routine recovery and execution must use the derived authoritative sources closest to the work: `README.md`, `AGENTS.md`, specialized docs, GitHub Issues/PRs, Git refs, CI, and release state. Re-read this file only when project-level intent, durable constraints, supported environments, non-goals, or completion criteria become materially unclear or are explicitly changed.
+This file defines the durable project direction for **Simple Server Optimizer (SSO)**. It is intentionally short: implementation details, live status, and task acceptance belong in the README, docs, GitHub Issues/PRs, Git, and CI.
 
 ## Mission
 
-Build a small, dependable Bash toolkit that measurably improves the safety, reliability, diagnosability, and network performance of **Debian/Ubuntu servers used primarily as VPN/proxy nodes**, while remaining understandable, reversible, and practical for real operators.
+Build and maintain a **small, practical, menu-driven Bash utility** that makes common Debian/Ubuntu server tuning and basic protection tasks easier for operators, especially on VPN/proxy nodes.
 
-The intended product direction is:
+The product should be simple to install, simple to run, easy to understand, and predictable when something fails.
 
-> **A safe, adaptive VPN/proxy server optimizer and abuse-protection toolkit.**
+SSO is not trying to become a complete VPN platform, a general security framework, a package manager, or a research project in perfect transactional shell behavior.
 
-SSO should optimize only where evidence and the actual workload justify it. It must not become a collection of cargo-cult sysctl values or broad destructive hardening rules.
+## Primary users and environments
 
-## Primary environments and users
+Primary users are operators of Debian/Ubuntu servers who want one lightweight script for common tasks such as:
 
-Primary workloads include, without being limited to:
+- basic network/kernel tuning;
+- CPU/IRQ/RPS helpers;
+- firewall blocklist/whitelist management;
+- Fail2Ban setup/integration;
+- backup, rollback, update, and uninstall.
 
-- WireGuard and other routed/TUN VPN gateways;
-- OpenVPN in UDP or TCP modes;
-- Xray-based proxy nodes such as VLESS/Reality deployments;
-- UDP/QUIC-oriented proxy transports such as Hysteria/TUIC;
-- mixed VPN/proxy nodes where forwarded traffic and locally-originated proxy traffic coexist.
-
-Primary supported operating systems remain Debian and Ubuntu. Exact supported versions are documented in `README.md` and must be verified before release changes.
+VPN/proxy workloads are the main use case, but v1.1.0 does not need protocol-specific automation.
 
 ## Product principles
 
-1. **Safety before tuning** — never trade correctness, connectivity, or recoverability for a theoretical benchmark gain.
-2. **Detect before changing** — inspect kernel, virtualization, interfaces, queues, existing configuration, and workload-relevant state before recommending or applying tuning.
-3. **Protocol-aware behavior** — TCP-only tuning must not be presented as a universal VPN optimization; UDP, forwarding, MTU/PMTU, conntrack, queueing, and routed traffic matter for VPN workloads.
-4. **Idempotent operations** — repeated application must converge to one intended state without duplicated rules or configuration drift.
-5. **Explicit ownership** — SSO must prefer its own drop-ins, state files, tables, chains, sets, and services instead of overwriting unrelated operator configuration.
-6. **Reversible changes** — every persistent SSO-owned change must have a credible rollback/uninstall path; backup existence alone is not proof of recoverability.
-7. **Fail closed on partial mutation** — validation should happen before dangerous apply steps, and partial failures must not be reported as success.
-8. **Atomic where practical** — firewall/list replacement and installation/update flows should avoid exposing half-applied state.
-9. **No lockout by surprise** — firewall changes must account for current management connectivity and clearly distinguish host traffic from forwarded VPN traffic.
-10. **IPv4 and IPv6 are first-class** — do not solve IPv6 concerns by blindly disabling IPv6.
-11. **Performance must be evidence-driven** — adaptive queue/IRQ/RPS/XPS/TCP/UDP tuning is preferred over fixed values when hardware, virtualization, queue topology, or kernel behavior can materially change the correct answer.
-12. **Supply-chain integrity matters** — root-executed online updates must be tied to an immutable release identity and integrity verification, not mutable branch contents alone.
-13. **Simple operator experience** — common operations such as blocking/unblocking an IP must be immediate, understandable, and verifiable without unnecessary menu round-trips.
-14. **No hidden policy** — managed defaults must be visible and explainable; SSO must not silently re-add operator-deleted policy unless it is an explicitly documented system invariant.
+1. **Ease of use first** — normal operation should be obvious and require as few steps as practical.
+2. **Fix real bugs before inventing architecture** — reproduced defects and operator friction outrank hypothetical edge cases.
+3. **Keep it small** — Bash and normal system tools are preferred; new abstractions and dependencies must earn their complexity.
+4. **Preserve operator configuration** — do not overwrite unrelated firewall, Fail2Ban, sysctl, service, or user files.
+5. **Report the truth** — rejected input, failed apply, partial support, or failed update must not be shown as complete success.
+6. **Be reversible enough for the actual feature** — use clear SSO-owned files and straightforward backup/rollback; do not build transaction frameworks unless a demonstrated requirement needs them.
+7. **Avoid cargo-cult tuning** — do not claim one tuning profile is universally optimal.
+8. **Use proportional safety and review** — root/system changes deserve care, but controls must match the actual change instead of automatically escalating every task into HIGH_ASSURANCE process.
+9. **Real-server feedback matters** — owner testing decides what future complexity is worth adding.
 
 ## Existing product surface
 
-The current toolkit is a menu-driven Bash application with modules for:
+The current toolkit is a modular Bash application with:
 
-- system/network inspection;
-- BBR/qdisc and TCP-related tuning;
-- CPU/IRQ/RPS/RFS/XPS tuning;
+- `sso.sh` menu entrypoint;
+- network and CPU tuning helpers;
 - firewall blocklist/whitelist management;
-- Fail2Ban setup/integration;
-- backups and rollback;
-- update and uninstall.
+- Fail2Ban integration;
+- backup/rollback/uninstall;
+- installer/update support.
 
-Preserve this small modular Bash architecture unless evidence shows that a larger runtime/dependency would deliver enough value to justify the added operational cost.
+Preserve this small architecture unless a concrete operator problem proves that a larger design is necessary.
 
-## Accepted delivery sequence
+## Current active outcome — v1.1.0
 
-### Phase 1 — v1.1.0 stabilization and trustworthy baseline
+v1.1.0 is a **focused stabilization release for the existing script**.
 
-The immediate active outcome is a stabilization release that fixes known correctness/safety defects and improves the existing features before adding major new VPN functionality.
+Required work is limited to:
 
-Required themes:
+- keep the existing regression/CI baseline;
+- preserve operator-owned Fail2Ban configuration and validate SSO-owned config;
+- retain the already-integrated rollback/uninstall correctness fixes;
+- fix local/offline installation and make update/reinstall explicit and simple;
+- ensure normal `sso` use runs installed files instead of re-downloading the project;
+- fix reproduced CPU/RPS persistence/correctness defects;
+- validate firewall list input, prevent false-success, and make common add/remove actions immediate and easy;
+- fix current output/UI contract defects that affect use;
+- publish v1.1.0 and test it on a real server.
 
-- stop SSO from overwriting unrelated Fail2Ban configuration;
-- make Fail2Ban whitelist synchronization syntactically valid and validate config before restart;
-- repair backup selection, backup identity collisions, rollback completeness, and uninstall leftovers;
-- make CPU/RPS persistence consistent across immediate apply and reboot;
-- correct CPU-mask handling where needed and remove unsafe universal tuning assumptions from user-facing language/behavior;
-- repair true offline/local installation behavior;
-- improve installer/update provenance and integrity handling appropriate to a root-executed tool;
-- separate machine-readable helper output from UI output where current contracts are broken;
-- make firewall list validation reject invalid entries before apply;
-- improve the **existing** firewall manager so add/remove is faster, easier, and applied immediately where safely possible;
-- replace per-entry firewall process spawning with validated bulk/transactional apply paths where supported, while preserving current policy semantics for this stabilization release;
-- add enough automated validation/CI to prevent the reproduced regressions from returning;
-- publish `v1.1.0` for operator testing.
+### Explicit v1.1.0 non-goals
 
-**Human validation boundary:** after `v1.1.0` is published, the owner will test it on a real VPN/proxy server. Do not begin the larger Phase 2+ product expansion until that feedback is reconciled, except for a necessary stabilization hotfix.
+Do **not** add these merely to make the release look more complete:
 
-### Phase 2 — VPN-aware firewall and traffic protection
+- a custom transactional installer/update subsystem;
+- inode-identity/race protocols for every temporary file/path;
+- runtime GitHub tag/ref object-resolution chains;
+- a bespoke cryptographic/supply-chain framework;
+- mandatory immutable-release platform machinery;
+- adaptive tuning engines;
+- VPN Doctor or protocol-specific profiles;
+- new FORWARD/IPv6 firewall feature surfaces;
+- broad concurrency, locking, or backend redesign without a reproduced problem;
+- large CI matrices or mandatory independent-review ceremony for otherwise bounded changes.
 
-After the v1.1.0 test gate, evolve firewall behavior for actual VPN/proxy traffic:
-
-- explicit INPUT / OUTPUT / FORWARD scopes;
-- routed VPN traffic protection via FORWARD where appropriate;
-- IPv6 block/allow sets;
-- counters and useful firewall statistics;
-- management-session safety checks / safe apply behavior;
-- search and explainability such as “why is this IP blocked?”;
-- clearer abuse-protection options and accurate naming for best-effort controls such as common BitTorrent-port blocking.
-
-### Phase 3 — VPN Doctor and protocol-aware profiles
-
-Add a read-only diagnostic capability first, then recommendations/profiles for workloads such as WireGuard, OpenVPN, Xray/VLESS/Reality, Hysteria/TUIC/QUIC, and mixed nodes. Important signals include forwarding, MTU/PMTU, UDP/TCP buffers, conntrack pressure, queue topology, packet/softnet drops, congestion control, and firewall coverage.
-
-### Phase 4 — adaptive performance tuning
-
-Make queue, IRQ, RPS/RFS/XPS, TCP, UDP, socket, and capacity tuning conditional on detected system/workload characteristics. Prefer before/after evidence and conservative defaults over fixed “maximum performance” values.
-
-### Phase 5 — abuse and operations improvements
-
-Potential work includes managed blocklist sources with provenance, safe refresh/diff/rollback, abuse profiles, diagnostics export, scheduled maintenance, and other low-cost operational improvements that demonstrate clear value.
+A versioned GitHub release/tag and normal HTTPS download path are sufficient for the v1.1.0 product contract. Straightforward checksums may be published when useful, but a custom trust engine is not a release requirement.
 
 ## v1.1.0 completion criteria
 
-The stabilization release is ready only when:
+The release is ready when:
 
-- reproduced P0/P1 defects targeted by the active stabilization Issues have regression coverage or equivalent high-signal validation;
-- all Bash files pass syntax checks and the repository CI policy;
-- firewall list apply cannot silently succeed after rejected entries in the supported path being tested;
-- Fail2Ban changes are isolated to SSO-owned configuration and are validated before service restart;
-- rollback/uninstall behavior accounts for every SSO-owned persistent artifact touched by the release;
-- install/update behavior has a documented, verified immutable release/integrity path;
-- release notes clearly identify remaining limitations and the real-server test boundary;
-- the reviewed release commit is tagged and published as `v1.1.0`.
+- the focused v1.1.0 Issues are integrated;
+- reproduced defects targeted by those Issues have focused regression coverage where practical;
+- Bash syntax, ShellCheck error-level checks, and the repository test suite pass on the exact release commit;
+- normal `sso` launch uses the installed application without update/download side effects;
+- local install works from the actual local payload directory;
+- explicit update/reinstall preserves a simple usable fallback and reports failure accurately;
+- Fail2Ban and rollback/uninstall preserve unrelated operator state;
+- firewall invalid input and backend failure do not produce false success;
+- v1.1.0 is tagged/published with concise notes and a short owner test checklist.
 
-## Non-goals
+## Future work
 
-Unless a later accepted Issue explicitly changes scope, SSO should not:
+Ideas such as VPN-aware firewall expansion, IPv6 sets, VPN Doctor, protocol profiles, adaptive tuning, managed blocklist sources, and broader abuse tooling are **deferred ideas**, not committed phases.
 
-- install or manage complete VPN products/panels as its primary job;
-- overwrite arbitrary operator-owned firewall, Fail2Ban, sysctl, or service configuration;
-- claim that blocking a few common ports fully blocks BitTorrent/P2P;
-- disable IPv6 globally as a generic hardening shortcut;
-- apply aggressive kernel/network settings solely because they are popular in tuning guides;
-- require a heavyweight application stack for functionality that Bash/system tools can implement clearly and safely;
-- mutate a production/user server merely to validate development changes when an isolated test environment can prove the behavior.
+After the owner tests v1.1.0, keep only ideas that solve a demonstrated need and justify their complexity.
 
-## Architecture and state boundaries
+## Engineering boundaries
 
-- Repository source: installation scripts, modules, defaults, docs, tests.
-- SSO persistent runtime state: `/etc/sso`.
-- SSO-owned sysctl drop-ins: `/etc/sysctl.d/99-sso-*.conf`.
-- SSO-owned services/restore helpers: explicitly named `sso-*` units/scripts.
-- Backups: must represent prior state accurately enough to restore the artifacts SSO owns.
-- Firewall: SSO must manage explicitly namespaced tables/chains/sets and avoid assuming ownership of unrelated rules.
-- Fail2Ban: SSO should use an SSO-owned drop-in under `jail.d` rather than owning `/etc/fail2ban/jail.local`.
+- Do not develop substantive changes directly on `main`.
+- Use PRs for substantive changes.
+- CI should stay small and high-signal: Bash syntax, ShellCheck error-level checks, and regression tests.
+- Do not mutate a shared development host's real firewall/sysctl/systemd/Fail2Ban/package state for tests.
+- Use temporary roots, mocks, or a dedicated disposable system where needed.
+- GitHub Copilot review is not used for this repository.
+- Default review is proportional Master/developer self-review plus CI. Independent review is added only when the **actual candidate** introduces exceptional destructive/security complexity that materially benefits from it.
+- Real server validation remains an owner/human operation unless a specific disposable target is explicitly authorized.
 
-These requirements are materialized into implementation-oriented documentation during bootstrap. After that, developers should use the specialized document that owns the relevant rule rather than repeatedly consulting this project specification.
+## Source-of-truth model
 
-## Engineering and release rules
+After this project-level direction is established:
 
-- Use isolated branches/workspaces for substantive work; do not develop directly on `main`.
-- For this project, PR-based integration is the normal path for substantive changes.
-- Use the dedicated AI Server Agent only in a uniquely isolated workspace for development/testing; never reuse or mutate another active Master's workspace.
-- Do not run firewall/sysctl/systemd mutations on a shared development host just to test code. Use mocks, namespaces, containers, or dedicated disposable systems proportional to the behavior under test.
-- Validate configuration before reload/restart when the underlying tool supports it.
-- Preserve operator configuration by default; SSO-owned drop-ins and namespaced resources are preferred.
-- Keep dependencies minimal and justified.
-- Version with SemVer. Release source must correspond to an immutable reviewed commit/tag.
-- Production/user-server testing is a human operation unless explicitly delegated for a specific disposable target.
-
-## Bootstrap output model
-
-This specification should be used to establish and, when project-level intent changes, reconcile the repository's normal authoritative sources. Bootstrap is complete when the project direction above is represented in the appropriate stable docs and the executable work is represented in GitHub Issues/PRs.
-
-After bootstrap:
-
-- `README.md` owns the user-facing product contract and supported usage;
-- `AGENTS.md` owns stable contributor/agent operating rules;
-- specialized `docs/*` files own architecture, development, testing, and release guidance;
-- GitHub Issues own unresolved work, priority, dependency, acceptance, and the active release plan;
-- Git/PRs own implementation identity and review history;
+- `README.md` owns user-facing behavior and usage;
+- `AGENTS.md` owns stable contributor/agent rules;
+- `docs/*` owns architecture/development guidance;
+- GitHub Issues own current scope, priority, acceptance, and dependencies;
+- PRs/Git own implementation identity;
 - CI owns validation state;
-- tags/releases own published delivery identity.
+- tags/releases own published versions.
 
-Do **not** put this file in the routine recovery checklist. A new Master should recover through those normal sources and only return here if project-level intent cannot otherwise be resolved or has been explicitly changed.
+This file should be revisited only when project-level intent materially changes.
 
 ## Project success
 
-SSO succeeds when an operator can safely install it on a supported VPN/proxy node, understand what it wants to change and why, apply only relevant optimizations, manage firewall policy quickly, diagnose important network bottlenecks, recover from changes, and upgrade/uninstall without losing unrelated system configuration.
+SSO succeeds when the owner can install it easily, run `sso`, understand the menu, apply the current features without unrelated configuration damage, see honest errors when something fails, update/reinstall deliberately, and remove or roll back SSO-owned changes without needing a heavyweight management system.
