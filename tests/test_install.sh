@@ -104,6 +104,51 @@ test_incomplete_payload_does_not_touch_existing_install() {
   rm -rf "$t"
 }
 
+test_unrecognized_existing_directory_is_preserved() {
+  local t
+  t="$(mktemp -d)" || return 1
+  make_payload "$t/source" || return 1
+  configure_temp_paths "$t" || return 1
+  mkdir -p "$INSTALL_DIR" || return 1
+  printf 'operator-data\n' > "$INSTALL_DIR/keep"
+  SOURCE_DIR="$t/source"
+
+  if install_local >/dev/null 2>&1; then
+    return 1
+  fi
+  [[ "$(cat "$INSTALL_DIR/keep")" == "operator-data" ]] || return 1
+  [[ ! -e "$INSTALL_DIR.bak" ]] || return 1
+  rm -rf "$t"
+}
+
+test_finalize_failure_restores_previous_install() {
+  local t
+  t="$(mktemp -d)" || return 1
+  make_payload "$t/source1" || return 1
+  make_payload "$t/source2" || return 1
+  printf '# old\n' >> "$t/source1/sso.sh"
+  printf '# new\n' >> "$t/source2/sso.sh"
+  configure_temp_paths "$t" || return 1
+
+  SOURCE_DIR="$t/source1"
+  install_local || return 1
+
+  rm -f "$LAUNCHER_PATH"
+  rm -rf "$(dirname -- "$LAUNCHER_PATH")"
+  printf 'not-a-directory\n' > "$t/blocked"
+  LAUNCHER_PATH="$t/blocked/sso"
+  SOURCE_DIR="$t/source2"
+
+  if install_local >/dev/null 2>&1; then
+    return 1
+  fi
+  grep -q '# old' "$INSTALL_DIR/sso.sh" || return 1
+  if grep -q '# new' "$INSTALL_DIR/sso.sh"; then
+    return 1
+  fi
+  rm -rf "$t"
+}
+
 test_online_download_uses_explicit_online_path() {
   local t remote
   t="$(mktemp -d)" || return 1
@@ -145,6 +190,8 @@ run_test "local install uses source directory and first install has no backup" t
 run_test "local payload already at install path is adopted without backup" test_local_payload_already_at_install_path_is_not_backed_up
 run_test "explicit update keeps one previous install" test_update_keeps_one_previous_install
 run_test "incomplete payload leaves existing install untouched" test_incomplete_payload_does_not_touch_existing_install
+run_test "unrecognized existing install directory is preserved" test_unrecognized_existing_directory_is_preserved
+run_test "finalization failure restores previous install" test_finalize_failure_restores_previous_install
 run_test "online mode downloads then installs through the same simple path" test_online_download_uses_explicit_online_path
 run_test "update menu uses installed installer with explicit online mode" test_update_menu_uses_installed_installer_explicitly
 finish_tests
