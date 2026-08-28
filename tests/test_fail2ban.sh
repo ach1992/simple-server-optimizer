@@ -186,10 +186,95 @@ test_backup_captures_only_sso_fail2ban_state() {
   return "$rc"
 }
 
+run_disable_fixture() {
+  local tmp="$1"
+  local active_rc="$2"
+  local validate_rc="$3"
+
+  mkdir -p "$tmp/etc/fail2ban/jail.d" "$tmp/state"
+  printf '[sshd]\nenabled = true\n' > "$tmp/etc/fail2ban/jail.d/sso.local"
+  : > "$tmp/state/fail2ban-nginx.enabled"
+  : > "$tmp/commands.log"
+
+  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" ACTIVE_RC="$active_rc" VALIDATE_RC="$validate_rc" bash -c '
+    set -Eeuo pipefail
+    STATE_DIR="$FIXTURE_ROOT/state"
+    F2B_DIR="$FIXTURE_ROOT/etc/fail2ban"
+    F2B_JAIL_DIR="$F2B_DIR/jail.d"
+    F2B_SSO_LOCAL="$F2B_JAIL_DIR/sso.local"
+    F2B_NGINX_MARKER="$STATE_DIR/fail2ban-nginx.enabled"
+    COMMAND_LOG="$FIXTURE_ROOT/commands.log"
+
+    systemctl() {
+      printf "systemctl %s\n" "$*" >> "$COMMAND_LOG"
+      if [[ "${1:-}" == "is-active" ]]; then
+        return "$ACTIVE_RC"
+      fi
+      return 0
+    }
+    fail2ban-client() {
+      printf "fail2ban-client %s\n" "$*" >> "$COMMAND_LOG"
+      if [[ "${1:-}" == "-t" ]]; then
+        return "$VALIDATE_RC"
+      fi
+      return 0
+    }
+
+    source "$ROOT_DIR/modules/utils.sh"
+    source "$ROOT_DIR/modules/fail2ban.sh"
+    fail2ban_disable_managed_config
+  '
+}
+
+test_disable_removes_only_sso_config_and_restarts_active_service() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  run_disable_fixture "$tmp" 0 0 >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ ! -e "$tmp/etc/fail2ban/jail.d/sso.local" ]] || rc=1
+  [[ ! -e "$tmp/state/fail2ban-nginx.enabled" ]] || rc=1
+  grep -q '^systemctl restart fail2ban$' "$tmp/commands.log" || rc=1
+  if grep -Eq '^systemctl (stop|disable|enable) ' "$tmp/commands.log"; then rc=1; fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_disable_preserves_inactive_service_state() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  run_disable_fixture "$tmp" 3 0 >/dev/null 2>&1 || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ ! -e "$tmp/etc/fail2ban/jail.d/sso.local" ]] || rc=1
+  if grep -Eq '^systemctl (restart|stop|disable|enable|start) ' "$tmp/commands.log"; then rc=1; fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+test_disable_validation_failure_restores_sso_config() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  if run_disable_fixture "$tmp" 3 1 >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  local rc=0
+  [[ -f "$tmp/etc/fail2ban/jail.d/sso.local" ]] || rc=1
+  [[ -f "$tmp/state/fail2ban-nginx.enabled" ]] || rc=1
+  if grep -Eq '^systemctl (restart|stop|disable|enable|start) ' "$tmp/commands.log"; then rc=1; fi
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "Fail2Ban integration preserves operator jail.local" test_preserves_operator_jail_local
 run_test "whitelist ignoreip is rendered inside DEFAULT" test_whitelist_is_under_default_section
 run_test "validation failure restores previous SSO config and skips systemctl" test_validation_failure_restores_previous_config_and_skips_service
 run_test "SSO Fail2Ban config rendering is idempotent" test_managed_config_is_idempotent
 run_test "nginx jail is an explicit managed section" test_nginx_section_is_explicit
 run_test "Fail2Ban backup captures only SSO-owned state" test_backup_captures_only_sso_fail2ban_state
+run_test "Fail2Ban disable removes only SSO config and restarts an active service" test_disable_removes_only_sso_config_and_restarts_active_service
+run_test "Fail2Ban disable preserves an inactive service state" test_disable_preserves_inactive_service_state
+run_test "Fail2Ban disable validation failure restores SSO config" test_disable_validation_failure_restores_sso_config
 finish_tests
