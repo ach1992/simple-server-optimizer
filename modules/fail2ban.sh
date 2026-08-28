@@ -286,7 +286,11 @@ module_fail2ban_sync_whitelist() {
     return
   fi
 
-  ensure_default_whitelist
+  if ! ensure_default_whitelist; then
+    err "SSO whitelist is invalid or unavailable; Fail2Ban was not changed."
+    pause
+    return
+  fi
 
   local enable_nginx=0
   [[ -f "$F2B_NGINX_MARKER" ]] && enable_nginx=1
