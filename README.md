@@ -244,7 +244,7 @@ The SSO **local installation itself does not download the SSO application** when
 bash install.sh --local
 ```
 
-However, some features inside SSO may later install normal operating-system packages such as Fail2Ban or irqbalance. Those package-install actions still require working Debian/Ubuntu package repositories unless the required packages are already installed or you provide your own offline package source.
+However, some features inside SSO may later install normal operating-system packages such as Fail2Ban, irqbalance, or `ipset`. Those package-install actions still require working Debian/Ubuntu package repositories unless the required packages are already installed or you provide your own offline package source.
 
 ---
 
@@ -347,6 +347,22 @@ SSO is designed to preserve unrelated operator-owned configuration instead of cl
 # Firewall behavior
 
 SSO currently provides an IPv4-oriented host firewall manager.
+
+To apply SSO firewall rules, the server needs **one usable firewall backend**:
+
+- usable `nftables`; **or**
+- both `iptables` **and** `ipset`.
+
+`iptables` by itself is not enough for the SSO blocklist/whitelist backend. Some minimal Debian/Ubuntu server images include `iptables` but do not include `ipset` by default. SSO's **System Check** reports whether a usable SSO backend is ready and, when `iptables` is present but `ipset` is missing, shows the exact package command to install it:
+
+```bash
+apt-get update
+apt-get install -y ipset
+```
+
+On a server without internet/package-repository access, provide `ipset` through your normal offline Debian/Ubuntu package source before applying SSO firewall rules.
+
+Importing the bundled blocklist only updates SSO's saved list. It does **not** install firewall packages and does **not** activate SSO firewall rules. Use **Apply/refresh SSO firewall rules** explicitly after a usable backend is available.
 
 The current stabilization work focuses on:
 
