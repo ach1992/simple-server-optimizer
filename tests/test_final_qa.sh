@@ -15,6 +15,23 @@ test_fail2ban_menu_does_not_claim_service_stop_is_rollback() {
   fi
 }
 
+test_fail2ban_invalid_whitelist_returns_to_menu() {
+  ROOT_DIR="$ROOT_DIR" bash -c '
+    set -Eeuo pipefail
+    STATE_DIR="/tmp/sso-final-qa-state-unused"
+    source "$ROOT_DIR/modules/fail2ban.sh"
+    header() { :; }
+    section() { :; }
+    pause() { :; }
+    err() { :; }
+    backup_create() { printf "%s\n" "/tmp/backup"; }
+    ensure_fail2ban_installed() { return 0; }
+    ensure_default_whitelist() { return 1; }
+    module_fail2ban_sync_whitelist
+    printf "returned-to-menu\n"
+  ' | grep -q '^returned-to-menu$'
+}
+
 test_network_apply_does_not_report_unconditional_success() {
   local file="$ROOT_DIR/modules/network.sh"
   grep -Fq 'runtime application may be partial' "$file" || return 1
@@ -32,6 +49,7 @@ test_firewall_menu_makes_apply_boundary_clear() {
 
 run_test "v1.1.0 release-candidate version is shown in the UI" test_release_candidate_version_is_visible
 run_test "Fail2Ban menu describes SSO-only disable behavior" test_fail2ban_menu_does_not_claim_service_stop_is_rollback
+run_test "invalid Fail2Ban whitelist returns cleanly to the menu" test_fail2ban_invalid_whitelist_returns_to_menu
 run_test "network apply failures are not presented as unconditional success" test_network_apply_does_not_report_unconditional_success
 run_test "firewall menu clearly separates import from apply" test_firewall_menu_makes_apply_boundary_clear
 finish_tests
