@@ -123,6 +123,27 @@ uninstall_sso_payload_dir_is_recognized() {
   return 0
 }
 
+# A recognized payload is not sufficient recursive-delete authority if the
+# fallback itself, or any path below it, is a mount boundary. Inspect the
+# current mount namespace and fail closed when that inspection is unavailable
+# or ambiguous. The caller repeats this check immediately before deletion.
+uninstall_recursive_tree_is_mount_safe() {
+  local root="${1%/}" mounts="" target=""
+
+  [[ -n "$root" && "$root" == /* && "$root" != "/" ]] || return 1
+  command -v findmnt >/dev/null 2>&1 || return 1
+  mounts="$(findmnt --kernel --noheadings --raw --output TARGET 2>/dev/null)" || return 1
+  [[ -n "$mounts" ]] || return 1
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if [[ "$target" == "$root" || "$target" == "$root/"* ]]; then
+      return 1
+    fi
+  done <<< "$mounts"
+  return 0
+}
+
 uninstall_remove_fail2ban_owned_state() {
   local managed="${F2B_SSO_LOCAL:-/etc/fail2ban/jail.d/sso.local}"
   local marker="${F2B_NGINX_MARKER:-$STATE_DIR/fail2ban-nginx.enabled}"
@@ -348,6 +369,10 @@ module_uninstall() {
       uninstall_abort_with_recovery "Previous install fallback is not a recognized SSO payload; refusing recursive removal: $previous_install"
       return 0
     fi
+    if ! uninstall_recursive_tree_is_mount_safe "$previous_install"; then
+      uninstall_abort_with_recovery "Could not prove previous install fallback is free of mount boundaries; refusing recursive removal: $previous_install"
+      return 0
+    fi
   fi
 
   # Ownership baselines live outside the replaceable install tree. Retry the
@@ -515,8 +540,13 @@ module_uninstall() {
       uninstall_abort_with_recovery "Previous install fallback is not a recognized SSO payload; refusing recursive removal: $previous_install"
       return 0
     fi
+    if ! uninstall_recursive_tree_is_mount_safe "$previous_install"; then
+      uninstall_abort_with_recovery "Could not prove previous install fallback is free of mount boundaries; refusing recursive removal: $previous_install"
+      return 0
+    fi
     info "Removing previous SSO install fallback: $previous_install"
-    if ! rm -rf -- "$previous_install" || [[ -e "$previous_install" || -L "$previous_install" ]]; then
+    if ! rm -rf --one-file-system --preserve-root=all -- "$previous_install" \
+      || [[ -e "$previous_install" || -L "$previous_install" ]]; then
       uninstall_abort_with_recovery "Could not remove previous SSO install fallback completely: $previous_install"
       return 0
     fi

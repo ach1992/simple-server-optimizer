@@ -39,8 +39,8 @@ make_recognized_sso_payload() {
 }
 
 run_fixture_uninstall() {
-  local tmp="$1"
-  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
+  local tmp="$1" mount_scenario="${2:-safe}"
+  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" MOUNT_SCENARIO="$mount_scenario" bash -c '
     set -Eeuo pipefail
     STATE_DIR="$FIXTURE_ROOT/state"; BACKUP_DIR_BASE="$FIXTURE_ROOT/backups"; SSO_DIR="$FIXTURE_ROOT/install"
     SSO_SYSTEMD_DIR="$FIXTURE_ROOT/systemd"; SSO_SYSCTL_DIR="$FIXTURE_ROOT/sysctl"; SSO_MODULES_LOAD_DIR="$FIXTURE_ROOT/modules-load"
@@ -56,6 +56,34 @@ run_fixture_uninstall() {
     uninstall_cpu_runtime_owned(){ return 1; }
     systemctl(){ [[ "$1" == "is-active" ]] && return 3; return 0; }
     run_step(){ return 0; }
+    findmnt() {
+      local calls=0
+      case "${MOUNT_SCENARIO:-safe}" in
+        safe)
+          printf "/\n"
+          ;;
+        root)
+          printf "/\n%s\n" "${SSO_DIR}.bak"
+          ;;
+        descendant)
+          printf "/\n%s\n" "${SSO_DIR}.bak/backups/operator-storage"
+          ;;
+        changes-after-preflight)
+          if [[ -f "$FIXTURE_ROOT/findmnt.calls" ]]; then
+            read -r calls < "$FIXTURE_ROOT/findmnt.calls" || return 2
+          fi
+          calls=$((calls + 1))
+          printf "%s\n" "$calls" > "$FIXTURE_ROOT/findmnt.calls"
+          printf "/\n"
+          if (( calls >= 2 )); then
+            printf "%s\n" "${SSO_DIR}.bak/backups/operator-storage"
+          fi
+          ;;
+        *)
+          return 2
+          ;;
+      esac
+    }
     module_uninstall
   ' >/dev/null 2>&1
 }
@@ -128,6 +156,71 @@ symlink_previous_install_blocks_destructive_completion() {
   return "$rc"
 }
 
+mountpoint_previous_install_blocks_before_cleanup() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_fixture "$tmp"
+  make_recognized_sso_payload "$tmp/install.bak"
+  printf 'operator-data\n' > "$tmp/install.bak/operator.keep"
+
+  run_fixture_uninstall "$tmp" root || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ -f "$tmp/install.bak/operator.keep" ]] || rc=1
+  [[ -f "$tmp/state/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/backups/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/install/sso.sh" ]] || rc=1
+  [[ -f "$tmp/bin/sso" ]] || rc=1
+  [[ -f "$tmp/systemd/sso-cpuirq.service" ]] || rc=1
+  [[ -f "$tmp/sysctl/99-sso-rps.conf" ]] || rc=1
+  [[ -f "$tmp/sbin/sso-cpuirq-restore" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+mounted_descendant_blocks_before_cleanup() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_fixture "$tmp"
+  make_recognized_sso_payload "$tmp/install.bak"
+  mkdir -p "$tmp/install.bak/backups/operator-storage"
+  printf 'operator-data\n' > "$tmp/install.bak/backups/operator-storage/keep"
+
+  run_fixture_uninstall "$tmp" descendant || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ -f "$tmp/install.bak/backups/operator-storage/keep" ]] || rc=1
+  [[ -f "$tmp/state/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/backups/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/install/sso.sh" ]] || rc=1
+  [[ -f "$tmp/bin/sso" ]] || rc=1
+  [[ -f "$tmp/systemd/sso-cpuirq.service" ]] || rc=1
+  [[ -f "$tmp/sysctl/99-sso-rps.conf" ]] || rc=1
+  [[ -f "$tmp/sbin/sso-cpuirq-restore" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+mount_becoming_unsafe_before_delete_preserves_recovery() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_fixture "$tmp"
+  make_recognized_sso_payload "$tmp/install.bak"
+  mkdir -p "$tmp/install.bak/backups/operator-storage"
+  printf 'operator-data\n' > "$tmp/install.bak/backups/operator-storage/keep"
+
+  run_fixture_uninstall "$tmp" changes-after-preflight || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ -f "$tmp/install.bak/backups/operator-storage/keep" ]] || rc=1
+  [[ -f "$tmp/state/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/backups/recovery.marker" ]] || rc=1
+  [[ -f "$tmp/install/sso.sh" ]] || rc=1
+  [[ -f "$tmp/bin/sso" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 previous_install_remove_failure_preserves_recovery() {
   local tmp
   tmp="$(mktemp -d)" || return 1
@@ -150,8 +243,10 @@ previous_install_remove_failure_preserves_recovery() {
     uninstall_cpu_runtime_owned(){ return 1; }
     systemctl(){ [[ "$1" == "is-active" ]] && return 3; return 0; }
     run_step(){ return 0; }
+    findmnt(){ printf "/\n"; }
     rm() {
-      if [[ "$#" -eq 3 && "$1" == "-rf" && "$2" == "--" && "$3" == "${SSO_DIR}.bak" ]]; then
+      local last="${!#}"
+      if [[ "$last" == "${SSO_DIR}.bak" ]]; then
         return 71
       fi
       command rm "$@"
@@ -172,5 +267,8 @@ previous_install_remove_failure_preserves_recovery() {
 run_test "recognized previous SSO install fallback is removed by full uninstall" recognized_previous_install_is_removed_on_success
 run_test "unrecognized previous-install directory blocks destructive completion before cleanup" unrecognized_previous_install_blocks_destructive_completion
 run_test "symlink previous-install path blocks destructive completion before cleanup" symlink_previous_install_blocks_destructive_completion
+run_test "mountpoint previous-install path blocks destructive completion before cleanup" mountpoint_previous_install_blocks_before_cleanup
+run_test "mounted descendant below previous install blocks destructive completion before cleanup" mounted_descendant_blocks_before_cleanup
+run_test "mount state becoming unsafe before deletion preserves recovery state" mount_becoming_unsafe_before_delete_preserves_recovery
 run_test "previous-install removal failure preserves recovery state" previous_install_remove_failure_preserves_recovery
 finish_tests
