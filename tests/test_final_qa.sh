@@ -47,9 +47,44 @@ test_firewall_menu_makes_apply_boundary_clear() {
   grep -Fq 'Apply/refresh SSO firewall rules' "$ROOT_DIR/sso.sh" || return 1
 }
 
+test_firewall_system_check_explains_missing_ipset() {
+  local output
+  output="$(ROOT_DIR="$ROOT_DIR" bash -c '
+    set -Eeuo pipefail
+    source "$ROOT_DIR/modules/utils.sh"
+    cmd_exists() {
+      [[ "$1" == "iptables" ]]
+    }
+    info() { printf "INFO:%s\n" "$*"; }
+    warn() { printf "WARN:%s\n" "$*"; }
+    firewall_info
+  ')" || return 1
+
+  grep -Fq 'iptables is present but ipset is missing' <<<"$output" || return 1
+  grep -Fq 'apt-get update && apt-get install -y ipset' <<<"$output" || return 1
+}
+
+test_firewall_system_check_accepts_iptables_with_ipset() {
+  local output
+  output="$(ROOT_DIR="$ROOT_DIR" bash -c '
+    set -Eeuo pipefail
+    source "$ROOT_DIR/modules/utils.sh"
+    cmd_exists() {
+      [[ "$1" == "iptables" || "$1" == "ipset" ]]
+    }
+    info() { printf "INFO:%s\n" "$*"; }
+    warn() { printf "WARN:%s\n" "$*"; }
+    firewall_info
+  ')" || return 1
+
+  grep -Fq 'SSO firewall backend: iptables + ipset ready' <<<"$output" || return 1
+}
+
 run_test "v1.1.0 release-candidate version is shown in the UI" test_release_candidate_version_is_visible
 run_test "Fail2Ban menu describes SSO-only disable behavior" test_fail2ban_menu_does_not_claim_service_stop_is_rollback
 run_test "invalid Fail2Ban whitelist returns cleanly to the menu" test_fail2ban_invalid_whitelist_returns_to_menu
 run_test "network apply failures are not presented as unconditional success" test_network_apply_does_not_report_unconditional_success
 run_test "firewall menu clearly separates import from apply" test_firewall_menu_makes_apply_boundary_clear
+run_test "System Check explains when iptables is present but ipset is missing" test_firewall_system_check_explains_missing_ipset
+run_test "System Check accepts iptables plus ipset as a usable backend" test_firewall_system_check_accepts_iptables_with_ipset
 finish_tests
