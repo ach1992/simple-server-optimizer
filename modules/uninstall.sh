@@ -130,6 +130,90 @@ uninstall_restore_fail2ban_service() {
   backup_restore_service_state "$baseline" fail2ban.service 1
 }
 
+# Detect a real SSO RPS/RFS/XPS apply, not merely an empty namespaced test or
+# stale placeholder. install/apply writes at least one of these recognizable
+# payloads before changing live queue state.
+uninstall_cpu_runtime_owned() {
+  local sysctl_dir="${SSO_SYSCTL_DIR:-/etc/sysctl.d}"
+  local systemd_dir="${SSO_SYSTEMD_DIR:-/etc/systemd/system}"
+  local local_sbin_dir="${SSO_LOCAL_SBIN_DIR:-/usr/local/sbin}"
+  local rps_file="$sysctl_dir/99-sso-rps.conf"
+  local unit_file="$systemd_dir/sso-cpuirq.service"
+  local restore_file="$local_sbin_dir/sso-cpuirq-restore"
+
+  if [[ -f "$rps_file" && ! -L "$rps_file" ]] \
+    && grep -Eq '^[[:space:]]*net\.core\.rps_sock_flow_entries=' "$rps_file"; then
+    return 0
+  fi
+  if [[ -f "$unit_file" && ! -L "$unit_file" ]] \
+    && grep -Fq 'Description=SSO CPU/IRQ tuning (RPS/RFS/XPS)' "$unit_file"; then
+    return 0
+  fi
+  if [[ -f "$restore_file" && ! -L "$restore_file" ]] \
+    && grep -Fq 'net.core.rps_sock_flow_entries=' "$restore_file"; then
+    return 0
+  fi
+  return 1
+}
+
+# A usable RPS snapshot is a pre-ownership baseline only when it is a fully
+# certified current-format snapshot and positively proves the SSO RPS sysctl
+# file, CPU unit, and restore helper were all absent before runtime mutation.
+uninstall_cpu_runtime_snapshot_is_preownership() {
+  local d="$1"
+  local tag="" format="" load="" enabled="" active=""
+  local service_state_dir="$d/services/sso-cpuirq.service"
+
+  [[ -d "$d" && ! -L "$d" ]] || return 1
+  [[ ! -e "$d/INCOMPLETE" && ! -L "$d/INCOMPLETE" ]] || return 1
+  [[ -f "$d/TAG" && ! -L "$d/TAG" ]] || return 1
+  [[ -f "$d/FORMAT" && ! -L "$d/FORMAT" ]] || return 1
+  [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
+  tag="$(cat "$d/TAG" 2>/dev/null)" || return 1
+  format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
+  [[ "$tag" == "cpu_irq:rps_rfs_xps" && "$format" == "$SSO_BACKUP_FORMAT" ]] || return 1
+
+  [[ -d "$d/cpu_irq" && ! -L "$d/cpu_irq" ]] || return 1
+  [[ -d "$d/cpu_irq/runtime" && ! -L "$d/cpu_irq/runtime" ]] || return 1
+  [[ -d "$d/cpu_irq/runtime/queues" && ! -L "$d/cpu_irq/runtime/queues" ]] || return 1
+  [[ -f "$d/cpu_irq/runtime/COMPLETE" && ! -L "$d/cpu_irq/runtime/COMPLETE" ]] || return 1
+  [[ -f "$d/cpu_irq/runtime/nic" && ! -L "$d/cpu_irq/runtime/nic" ]] || return 1
+  [[ -f "$d/cpu_irq/runtime/rps_sock_flow_entries" && ! -L "$d/cpu_irq/runtime/rps_sock_flow_entries" ]] || return 1
+
+  [[ -f "$d/sysctl/99-sso-rps.conf.absent" && ! -L "$d/sysctl/99-sso-rps.conf.absent" ]] || return 1
+  [[ -f "$d/cpu_irq/sso-cpuirq.service.absent" && ! -L "$d/cpu_irq/sso-cpuirq.service.absent" ]] || return 1
+  [[ -f "$d/cpu_irq/sso-cpuirq-restore.absent" && ! -L "$d/cpu_irq/sso-cpuirq-restore.absent" ]] || return 1
+
+  [[ -d "$service_state_dir" && ! -L "$service_state_dir" ]] || return 1
+  [[ -f "$service_state_dir/load" && ! -L "$service_state_dir/load" ]] || return 1
+  [[ -f "$service_state_dir/enabled" && ! -L "$service_state_dir/enabled" ]] || return 1
+  [[ -f "$service_state_dir/active" && ! -L "$service_state_dir/active" ]] || return 1
+  load="$(cat "$service_state_dir/load" 2>/dev/null)" || return 1
+  enabled="$(cat "$service_state_dir/enabled" 2>/dev/null)" || return 1
+  active="$(cat "$service_state_dir/active" 2>/dev/null)" || return 1
+  [[ "$load" == "not-found" && "$enabled" == "not-found" && "$active" == "inactive" ]]
+}
+
+uninstall_find_cpu_runtime_baseline() {
+  local source=""
+
+  source="$(backup_first_tag_in_root "$BACKUP_DIR_BASE" 'cpu_irq:rps_rfs_xps' 2>/dev/null || true)"
+  if [[ -n "$source" ]] && uninstall_cpu_runtime_snapshot_is_preownership "$source"; then
+    printf '%s\n' "$source"
+    return 0
+  fi
+
+  if [[ -n "${SSO_DIR:-}" ]]; then
+    source="$(backup_first_tag_in_root "${SSO_DIR}.bak/backups" 'cpu_irq:rps_rfs_xps' 2>/dev/null || true)"
+    if [[ -n "$source" ]] && uninstall_cpu_runtime_snapshot_is_preownership "$source"; then
+      printf '%s\n' "$source"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 uninstall_abort_with_recovery() {
   local message="$1"
   err "$message"
@@ -175,10 +259,20 @@ module_uninstall() {
     return 0
   fi
 
-  local bbr_baseline="" f2b_baseline="" irq_baseline=""
+  local bbr_baseline="" f2b_baseline="" irq_baseline="" cpu_runtime_baseline=""
   bbr_baseline="$(backup_resource_baseline_dir bbr 2>/dev/null || true)"
   f2b_baseline="$(backup_resource_baseline_dir fail2ban 2>/dev/null || true)"
   irq_baseline="$(backup_resource_baseline_dir irqbalance 2>/dev/null || true)"
+
+  local cpu_runtime_owned=0
+  if uninstall_cpu_runtime_owned; then
+    cpu_runtime_owned=1
+    cpu_runtime_baseline="$(uninstall_find_cpu_runtime_baseline 2>/dev/null || true)"
+    if [[ -z "$cpu_runtime_baseline" ]]; then
+      uninstall_abort_with_recovery "Could not prove the pre-SSO RPS/RFS/XPS runtime baseline; refusing to remove CPU recovery state."
+      return 0
+    fi
+  fi
 
   if [[ -n "$bbr_baseline" ]]; then
     info "Using pre-BBR resource baseline: $bbr_baseline"
@@ -201,6 +295,14 @@ module_uninstall() {
   if ! uninstall_disable_sso_service sso-cpuirq.service; then
     uninstall_abort_with_recovery "Could not verify sso-cpuirq.service is stopped and disabled."
     return 0
+  fi
+
+  if [[ "$cpu_runtime_owned" == "1" ]]; then
+    info "Restoring pre-SSO RPS/RFS/XPS runtime state"
+    if ! backup_restore_cpu_runtime "$cpu_runtime_baseline"; then
+      uninstall_abort_with_recovery "Could not fully restore the captured pre-SSO RPS/RFS/XPS runtime state."
+      return 0
+    fi
   fi
 
   info "Removing SSO firewall runtime state"

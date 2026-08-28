@@ -239,29 +239,35 @@ backup_restore_cpu_runtime() {
   local d="$1"
   local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
   local runtime_dir="$d/cpu_irq/runtime"
-  local nic value captured rel queue knob target actual
-  local failed=0
+  local nic value captured rel queue knob target actual path expected_global
+  local failed=0 captured_count=0 current_count=0
+  local -A captured_inventory=()
 
   [[ -f "$runtime_dir/COMPLETE" && ! -L "$runtime_dir/COMPLETE" ]] || return 2
-  [[ -f "$runtime_dir/nic" && -f "$runtime_dir/rps_sock_flow_entries" ]] || return 1
+  [[ -d "$d" && ! -L "$d" ]] || return 1
+  [[ -f "$d/FORMAT" && ! -L "$d/FORMAT" ]] || return 1
+  [[ "$(cat "$d/FORMAT" 2>/dev/null || true)" == "$SSO_BACKUP_FORMAT" ]] || return 1
+  [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
+  [[ -d "$d/cpu_irq" && ! -L "$d/cpu_irq" ]] || return 1
+  [[ -d "$runtime_dir" && ! -L "$runtime_dir" ]] || return 1
+  [[ -f "$runtime_dir/nic" && ! -L "$runtime_dir/nic" ]] || return 1
+  [[ -f "$runtime_dir/rps_sock_flow_entries" && ! -L "$runtime_dir/rps_sock_flow_entries" ]] || return 1
+  [[ -d "$runtime_dir/queues" && ! -L "$runtime_dir/queues" ]] || return 1
 
   nic="$(cat "$runtime_dir/nic" 2>/dev/null)" || return 1
   [[ "$nic" =~ ^[[:alnum:]_.:-]+$ ]] || return 1
   [[ -d "$net_root/$nic/queues" ]] || return 1
   command -v sysctl >/dev/null 2>&1 || return 1
 
-  value="$(cat "$runtime_dir/rps_sock_flow_entries" 2>/dev/null)" || return 1
-  [[ "$value" =~ ^[0-9]+$ ]] || return 1
-  if ! sysctl -w "net.core.rps_sock_flow_entries=$value" >/dev/null 2>&1; then
-    warn "Could not restore net.core.rps_sock_flow_entries=$value."
-    failed=1
-  else
-    actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
-    [[ "$actual" == "$value" ]] || failed=1
-  fi
+  expected_global="$(cat "$runtime_dir/rps_sock_flow_entries" 2>/dev/null)" || return 1
+  [[ "$expected_global" =~ ^[0-9]+$ ]] || return 1
 
+  # Validate the complete captured inventory before any live write. Every
+  # captured entry must be a regular non-symlink queue knob with a valid value.
   while IFS= read -r captured; do
     [[ -n "$captured" ]] || continue
+    [[ -f "$captured" && ! -L "$captured" ]] || return 1
+    [[ -d "$(dirname "$captured")" && ! -L "$(dirname "$captured")" ]] || return 1
     rel="${captured#"$runtime_dir/queues/"}"
     queue="${rel%%/*}"
     knob="${rel#*/}"
@@ -270,20 +276,58 @@ backup_restore_cpu_runtime() {
       rx-[0-9]*:rps_cpus|rx-[0-9]*:rps_flow_cnt|tx-[0-9]*:xps_cpus) ;;
       *) return 1 ;;
     esac
+    value="$(cat "$captured" 2>/dev/null)" || return 1
+    case "$knob" in
+      rps_cpus|xps_cpus) [[ "$value" =~ ^[0-9A-Fa-f,]+$ ]] || return 1 ;;
+      rps_flow_cnt) [[ "$value" =~ ^[0-9]+$ ]] || return 1 ;;
+    esac
+    captured_inventory["$rel"]=1
+    captured_count=$((captured_count + 1))
+  done < <(find "$runtime_dir/queues" -mindepth 2 -maxdepth 2 -print 2>/dev/null | LC_ALL=C sort)
 
+  # Reconcile current sysfs topology against the captured inventory before the
+  # first write. Missing captures, disappeared targets, extra queues, symlinks,
+  # or malformed current paths all make exact restoration unverifiable.
+  for path in \
+    "$net_root/$nic"/queues/rx-*/rps_cpus \
+    "$net_root/$nic"/queues/rx-*/rps_flow_cnt \
+    "$net_root/$nic"/queues/tx-*/xps_cpus; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    [[ -d "$(dirname "$path")" && ! -L "$(dirname "$path")" ]] || return 1
+    rel="${path#"$net_root/$nic/queues/"}"
+    queue="${rel%%/*}"
+    knob="${rel#*/}"
+    case "$queue:$knob" in
+      rx-[0-9]*:rps_cpus|rx-[0-9]*:rps_flow_cnt|tx-[0-9]*:xps_cpus) ;;
+      *) return 1 ;;
+    esac
+    [[ -n "${captured_inventory[$rel]+x}" ]] || return 1
+    current_count=$((current_count + 1))
+  done
+  [[ "$current_count" -eq "$captured_count" ]] || return 1
+
+  if ! sysctl -w "net.core.rps_sock_flow_entries=$expected_global" >/dev/null 2>&1; then
+    warn "Could not restore net.core.rps_sock_flow_entries=$expected_global."
+    failed=1
+  else
+    actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
+    [[ "$actual" == "$expected_global" ]] || failed=1
+  fi
+
+  while IFS= read -r captured; do
+    [[ -n "$captured" ]] || continue
+    rel="${captured#"$runtime_dir/queues/"}"
+    queue="${rel%%/*}"
+    knob="${rel#*/}"
     target="$net_root/$nic/queues/$queue/$knob"
-    if [[ ! -e "$target" ]]; then
+    if [[ ! -f "$target" || -L "$target" ]]; then
       warn "Captured CPU queue target is no longer present: $target"
       failed=1
       continue
     fi
 
     value="$(cat "$captured" 2>/dev/null)" || return 1
-    case "$knob" in
-      rps_cpus|xps_cpus) [[ "$value" =~ ^[0-9A-Fa-f,]+$ ]] || return 1 ;;
-      rps_flow_cnt) [[ "$value" =~ ^[0-9]+$ ]] || return 1 ;;
-    esac
-
     if ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
       warn "Could not restore CPU queue value: $target"
       failed=1
@@ -294,7 +338,35 @@ backup_restore_cpu_runtime() {
       warn "CPU queue value did not verify after restore: $target"
       failed=1
     fi
-  done < <(find "$runtime_dir/queues" -mindepth 2 -maxdepth 2 -type f -print 2>/dev/null | sort)
+  done < <(find "$runtime_dir/queues" -mindepth 2 -maxdepth 2 -type f -print 2>/dev/null | LC_ALL=C sort)
+
+  # Topology may change while restoring. Reconcile again before reporting
+  # success so a newly appeared or disappeared queue cannot be silently left at
+  # an SSO-applied value while recovery evidence is deleted by uninstall.
+  current_count=0
+  for path in \
+    "$net_root/$nic"/queues/rx-*/rps_cpus \
+    "$net_root/$nic"/queues/rx-*/rps_flow_cnt \
+    "$net_root/$nic"/queues/tx-*/xps_cpus; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    [[ -d "$(dirname "$path")" && ! -L "$(dirname "$path")" ]] || return 1
+    rel="${path#"$net_root/$nic/queues/"}"
+    [[ -n "${captured_inventory[$rel]+x}" ]] || return 1
+    current_count=$((current_count + 1))
+  done
+  [[ "$current_count" -eq "$captured_count" ]] || return 1
+
+  actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
+  [[ "$actual" == "$expected_global" ]] || failed=1
+  while IFS= read -r captured; do
+    [[ -n "$captured" ]] || continue
+    rel="${captured#"$runtime_dir/queues/"}"
+    target="$net_root/$nic/queues/$rel"
+    value="$(cat "$captured" 2>/dev/null)" || return 1
+    actual="$(cat "$target" 2>/dev/null || true)"
+    [[ "$actual" == "$value" ]] || failed=1
+  done < <(find "$runtime_dir/queues" -mindepth 2 -maxdepth 2 -type f -print 2>/dev/null | LC_ALL=C sort)
 
   return "$failed"
 }
