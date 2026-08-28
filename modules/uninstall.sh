@@ -72,7 +72,11 @@ uninstall_disable_sso_service() {
   systemd_disable_now_safe "$unit"
   command -v systemctl >/dev/null 2>&1 || return 1
 
-  local active enabled
+  local load active enabled
+  load="$(systemd_load_state "$unit")"
+  [[ -n "$load" ]] || return 1
+  [[ "$load" == "not-found" ]] && return 0
+
   active="$(systemctl is-active "$unit" 2>/dev/null || true)"
   enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
 
