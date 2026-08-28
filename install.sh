@@ -126,8 +126,24 @@ activate_payload() {
       err "Install path exists but is not a normal directory: $INSTALL_DIR"
       return 1
     }
+    has_payload "$INSTALL_DIR" || {
+      err "Refusing to replace an unrecognized directory: $INSTALL_DIR"
+      return 1
+    }
     had_previous=1
-    rm -rf -- "$backup" || return 1
+
+    if [[ -e "$backup" || -L "$backup" ]]; then
+      [[ -d "$backup" && ! -L "$backup" ]] || {
+        err "Backup path is not a normal SSO directory: $backup"
+        return 1
+      }
+      has_payload "$backup" || {
+        err "Refusing to remove an unrecognized backup directory: $backup"
+        return 1
+      }
+      rm -rf -- "$backup" || return 1
+    fi
+
     mv -- "$INSTALL_DIR" "$backup" || return 1
 
     if [[ -d "$backup/backups" ]]; then
@@ -145,9 +161,15 @@ activate_payload() {
     return 1
   fi
 
-  chmod 755 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/sso.sh" || return 1
-  write_install_state || return 1
-  create_launcher || return 1
+  if ! chmod 755 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/sso.sh" \
+    || ! write_install_state \
+    || ! create_launcher; then
+    rm -rf -- "$INSTALL_DIR" 2>/dev/null || true
+    if [[ "$had_previous" -eq 1 && -d "$backup" ]]; then
+      mv -- "$backup" "$INSTALL_DIR" 2>/dev/null || true
+    fi
+    return 1
+  fi
 
   if [[ "$had_previous" -eq 0 ]]; then
     rm -rf -- "$backup" 2>/dev/null || true
