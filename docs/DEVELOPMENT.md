@@ -32,25 +32,30 @@ Do not mutate the shared development host's live firewall, routing, sysctl, syst
 
 Use mocks/temp roots for normal development. Use a disposable isolated VM/server only when the behavior genuinely cannot be validated otherwise.
 
-## 4. v1.1.0 stabilization priorities
+## 4. Delivered v1.1.0 stabilization baseline
 
-The current release should validate only the existing behavior being fixed:
+The published `v1.1.0` release established and validated these behaviors:
 
 - Fail2Ban operator configuration is not overwritten;
-- rollback/uninstall handles SSO-owned artifacts correctly;
+- rollback/uninstall acts only on proven SSO-owned state and restores captured runtime state where required;
 - local/offline installer uses its actual payload directory;
 - normal `sso` launch does not download/update the application;
 - explicit update/reinstall is simple, validates required files, preserves a straightforward previous-install fallback, and reports failure accurately;
-- immediate and persisted CPU/RPS values agree where the existing feature supports them;
+- immediate and persisted CPU/RPS/RFS/XPS values agree where the feature supports them;
+- rollback/uninstall restores the exact captured RPS/RFS/XPS runtime baseline or fails closed;
 - firewall input is validated before apply;
 - firewall backend failure cannot produce complete-success output;
-- blacklist/whitelist add/remove is immediate and simple when the active backend is available.
+- blacklist/whitelist add/remove is immediate and simple when the active backend is available;
+- SSO-owned Fail2Ban is stopped and verified before package purge;
+- installer-created previous-install fallback state is removed safely during full uninstall.
+
+Treat this as the compatibility baseline for later maintenance unless a future accepted Issue intentionally changes behavior.
 
 ## 5. Installer/update guidance
 
 Keep the installer understandable.
 
-For v1.1.0 it needs to:
+The v1.1.0 baseline requires it to:
 
 1. locate the payload relative to `install.sh` for local/offline use;
 2. validate the small required file set before replacing an installation;
@@ -60,9 +65,9 @@ For v1.1.0 it needs to:
 6. fail clearly if copy/validation fails;
 7. keep normal application launch separate from update.
 
-A versioned GitHub release/tag download path is sufficient for published v1.1.0 installation/update guidance.
+A versioned GitHub release/tag source path is sufficient for immutable published-version installation/update guidance.
 
-Do not make these v1.1.0 requirements unless a new accepted Issue explicitly adds them:
+Do not add these requirements unless a new accepted Issue explicitly needs them:
 
 - custom atomic publication frameworks;
 - inode-identity/race state machines;
@@ -79,7 +84,7 @@ For the current firewall manager, focus on:
 - false-success prevention;
 - simple add/remove behavior;
 - idempotent re-apply;
-- preserving existing v1.0 policy scope.
+- preserving existing policy scope.
 
 Use a backend batch path when it is already simple and materially avoids obvious per-entry overhead, but do not redesign the firewall subsystem solely for theoretical scale or concurrency.
 
@@ -117,21 +122,25 @@ Do not add large matrices, caches, or release/security machinery unless a real c
 
 ## 10. Release readiness
 
-For v1.1.0:
+For a future release:
 
-- integrate the simplified accepted Issues;
+- define the bounded release outcome in GitHub Issues;
+- integrate the accepted changes;
 - run required checks on the exact release commit;
 - ensure README/release notes match shipped behavior;
-- create tag `v1.1.0` on that exact commit;
+- create the version tag on that exact commit;
 - publish a normal GitHub Release;
 - optionally publish straightforward SHA256 checksums where useful;
-- give the owner a short real-server test checklist.
+- run proportionate owner/real-server validation when system-level behavior warrants it;
+- verify the published tag/Release resolves to the intended exact commit before closing delivery work.
 
-The release does not require a custom immutable-release workflow, runtime tag resolver, or bespoke supply-chain implementation.
+The release process does not require a custom immutable-release workflow, runtime tag resolver, or bespoke supply-chain implementation unless a future accepted requirement demonstrates that need.
+
+`v1.1.0` completed this process successfully and is the current published stabilization baseline.
 
 ## 11. Owner test handoff
 
-The owner test checklist should stay concise and practical:
+When a future release needs real-server validation, keep the owner checklist concise and practical. Depending on the changed surface, it may include:
 
 - install from the documented release path;
 - run `sso` and confirm no unwanted re-download occurs;
@@ -142,4 +151,4 @@ The owner test checklist should stay concise and practical:
 - exercise rollback/uninstall as appropriate;
 - return the exact failing command/output/log if something breaks.
 
-Future feature work stays deferred until this real-server feedback is reconciled.
+The `v1.1.0` real-server validation is complete. Future feature work should still be driven by demonstrated operator need rather than an automatic expansion roadmap.

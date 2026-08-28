@@ -70,7 +70,7 @@ After installation, SSO opens automatically. Later you can start it with:
 sso
 ```
 
-> When a stable tagged release is published, prefer the versioned/tagged installation instructions in that GitHub Release instead of the development `main` branch.
+> Stable release `v1.1.0` is published. For an exact immutable `v1.1.0` installation/update, use the Source ZIP or tarball from the [`v1.1.0` GitHub Release](https://github.com/ach1992/simple-server-optimizer/releases/tag/v1.1.0), extract the complete source tree, and run `bash install.sh --local`. The `--online` channel follows the current `main` branch.
 
 ---
 
@@ -364,7 +364,7 @@ On a server without internet/package-repository access, provide `ipset` through 
 
 Importing the bundled blocklist only updates SSO's saved list. It does **not** install firewall packages and does **not** activate SSO firewall rules. Use **Apply/refresh SSO firewall rules** explicitly after a usable backend is available.
 
-The current stabilization work focuses on:
+The published `v1.1.0` stabilization baseline includes:
 
 - validating IPv4/CIDR list entries before apply;
 - rejecting invalid state clearly;
@@ -375,7 +375,7 @@ The current stabilization work focuses on:
 - keeping those list changes persisted;
 - using straightforward batching for larger lists.
 
-SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface are intentionally outside the current v1.1.0 scope.
+SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface are intentionally outside the published `v1.1.0` scope.
 
 Common BitTorrent-port blocking is **best-effort port blocking**, not complete BitTorrent protocol detection.
 
@@ -406,7 +406,7 @@ SSO includes helpers for:
 
 These are practical helpers, not a claim that one fixed set of values is universally optimal for every server or every VPN/proxy workload.
 
-The current v1.1.0 work focuses on correctness and persistence of existing behavior rather than adaptive tuning or protocol-specific profiles.
+The published `v1.1.0` baseline focuses on correctness and persistence of existing behavior rather than adaptive tuning or protocol-specific profiles.
 
 ---
 
@@ -440,14 +440,17 @@ For important servers, a provider snapshot or console remains the best final saf
 
 ---
 
-# Current release focus: v1.1.0
+# Published release baseline: v1.1.0
 
-v1.1.0 is a **focused stabilization release**, not a major feature expansion.
+`v1.1.0` is the current published **focused stabilization release**, not a major feature expansion.
 
-The work includes:
+The delivered release includes:
 
 - preserving operator-owned Fail2Ban configuration;
+- journald-only SSH Fail2Ban support on supported hosts;
 - rollback/uninstall correctness fixes;
+- exact RPS/RFS/XPS runtime restoration during rollback/uninstall;
+- safe removal of installer-created previous-install fallback state;
 - reliable local/offline installation;
 - normal `sso` launch using installed files without re-downloading;
 - explicit/simple update and reinstall behavior;
@@ -455,11 +458,11 @@ The work includes:
 - firewall input validation and honest apply failures;
 - immediate active-backend blacklist/whitelist add/remove;
 - focused CI/regression coverage;
-- a simple release and real-server owner validation handoff.
+- completed real-server owner validation and published GitHub Release.
 
 Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.0**.
 
-Future work will be selected from real usage and operator feedback.
+Future work will be selected from reproduced defects, compatibility needs, real usage, and operator feedback rather than an automatic expansion roadmap.
 
 ---
 
