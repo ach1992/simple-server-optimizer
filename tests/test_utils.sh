@@ -36,6 +36,21 @@ test_validate_ipv4_helpers() {
   return "$rc"
 }
 
+test_ensure_dirs_does_not_clobber_caller_d() {
+  local tmp d
+  tmp="$(mktemp -d)" || return 1
+  d="expected-backup-path"
+
+  ensure_dirs "$tmp/one" "$tmp/two" || { rm -rf "$tmp"; return 1; }
+
+  local rc=0
+  [[ "$d" == "expected-backup-path" ]] || rc=1
+  [[ -d "$tmp/one" && -d "$tmp/two" ]] || rc=1
+  rm -rf "$tmp"
+  return "$rc"
+}
+
 run_test "prompt_choice writes to the caller-provided variable" test_prompt_choice_writes_named_output
 run_test "IPv4/CIDR validator rejects malformed values" test_validate_ipv4_helpers
+run_test "ensure_dirs does not overwrite a caller's local d variable" test_ensure_dirs_does_not_clobber_caller_d
 finish_tests

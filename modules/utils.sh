@@ -130,6 +130,7 @@ require_root() {
 }
 
 ensure_dirs() {
+  local d
   for d in "$@"; do
     mkdir -p "$d"
   done
