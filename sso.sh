@@ -148,38 +148,26 @@ menu_update() {
   while true; do
     header
     section "Update SSO"
-    echo "1) Offline/Online note"
-    echo "2) Re-run installer (online/offline selector)"
+    echo "1) Update/reinstall from online source"
     echo "0) Back"
     prompt_choice "Select an option" choice
     case "$choice" in
       1)
-        info "If files exist in /root/simple-server-optimizer, installer can run offline."
-        info "Online mode downloads latest scripts. Blocklist file is not automatically downloaded."
+        if [[ ! -f "$SSO_DIR/install.sh" ]]; then
+          err "Installed install.sh is missing. Reinstall SSO using the documented installer command."
+          pause
+          continue
+        fi
+
+        info "Updating SSO..."
+        if bash "$SSO_DIR/install.sh" --online --no-run; then
+          ok "Update completed. Reloading SSO..."
+          exec bash "$SSO_DIR/sso.sh"
+        fi
+
+        err "Update failed. The previous installation remains available as a fallback when an update had already started."
         pause
         ;;
-      2)
-        # Re-run installer even if install.sh is missing locally (robust for online installs)
-        local installer="/tmp/sso-install.sh"
-        local url="https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh"
-        if [[ -f "$SSO_DIR/install.sh" ]]; then
-          info "Re-running local installer..."
-          bash "$SSO_DIR/install.sh" || warn "Installer exited with error."
-        else
-          warn "Local install.sh not found. Downloading installer from GitHub..."
-          if ! cmd_exists curl; then
-            run_step "Installing curl" apt-get update -y || true
-            run_step "Installing curl" apt-get install -y curl || true
-          fi
-          if cmd_exists curl; then
-            run_step "Downloading installer" curl -fsSL "$url" -o "$installer" || { err "Failed to download installer."; pause; break; }
-            bash "$installer" || warn "Installer exited with error."
-          else
-            err "curl is not available; cannot download installer."
-          fi
-        fi
-        ;;
-
       0) return ;;
       *) warn "Invalid choice." ;;
     esac
@@ -214,7 +202,6 @@ main_menu() {
   done
 }
 
-# load module entrypoints
 source "$MODULES_DIR/rollback.sh"
 source "$MODULES_DIR/network.sh"
 source "$MODULES_DIR/cpu_irq.sh"
