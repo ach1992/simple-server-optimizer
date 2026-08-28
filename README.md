@@ -1,142 +1,455 @@
 # Simple Server Optimizer (SSO)
 
-Simple Server Optimizer is a **small, menu-driven Bash utility** for Debian/Ubuntu servers, especially VPN/proxy nodes.
+Simple Server Optimizer is a **small, menu-driven Bash utility for Debian and Ubuntu servers**, especially VPN/proxy nodes.
 
-Its purpose is simple: make common tuning, firewall, Fail2Ban, backup/rollback, update, and uninstall tasks easier to run and easier to understand without requiring a heavyweight management stack.
+SSO is intentionally simple. It is not a control panel, package manager, VPN platform, or large automation framework. Its job is to make a small set of common server operations easier to run, understand, repeat, and roll back.
 
-The project deliberately prefers practical fixes over large architecture.
+## What SSO provides
 
-## What SSO currently does
+From one `sso` menu you can access:
 
-- network/kernel tuning helpers;
+- system/network status checks;
+- fq + BBR and basic TCP tuning helpers;
 - CPU / IRQ / RPS / RFS / XPS helpers;
-- firewall blocklist/whitelist management;
+- IPv4 firewall blocklist and whitelist management;
 - Fail2Ban setup/integration;
-- backup and rollback;
-- update and uninstall;
-- `sso` launcher/menu.
+- SSO backups and rollback;
+- explicit online update/reinstall;
+- uninstall and cleanup of SSO-owned state.
 
-SSO runs low-level operations as root, so important servers should still have a snapshot or out-of-band console available when testing a new release.
+SSO performs low-level system operations as root. On important servers, keep provider console/out-of-band access or a server snapshot available when testing a new release.
 
-## Current focus: v1.1.0
+---
 
-v1.1.0 is a **focused stabilization release**. The goal is to fix problems in the current script, not turn SSO into a larger platform.
-
-Current release work is limited to:
-
-- preserving operator-owned Fail2Ban configuration;
-- retaining the rollback/uninstall correctness fixes already integrated;
-- fixing local/offline install behavior;
-- making normal `sso` execution use installed files without re-downloading the project;
-- making update/reinstall explicit and simple;
-- fixing reproduced CPU/RPS persistence problems;
-- validating firewall input and preventing false-success;
-- making firewall add/remove quick and immediate where the active backend supports it;
-- keeping CI/regressions small and useful;
-- publishing v1.1.0 for real-server owner testing.
-
-Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.0**.
-
-Future work will be chosen after real use shows what is actually valuable.
-
-## Supported OS
+## Supported operating systems
 
 Current documented targets:
 
 - Debian 10 / 11 / 12 / 13
 - Ubuntu 20.04 / 22.04 / 24.04
 
-Other distributions are not targeted by design.
+Other distributions are not currently targeted.
 
-## Quick Start
+The examples below assume you are already logged in as `root`. If you use a normal sudo-enabled account, prefix the commands with `sudo` where appropriate.
 
-### Online install
+---
 
-For the current development baseline:
+# Installation
+
+There are two supported installation paths:
+
+1. **Online install** — the server downloads SSO directly from GitHub.
+2. **Offline/local install** — you download the complete SSO source on another computer, upload it to the server, and install entirely from those local files.
+
+If your server cannot reach `raw.githubusercontent.com` reliably, use the offline/local method.
+
+## Method 1 — Online install
+
+For the current development baseline on `main`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh -o /tmp/sso-install.sh
-sudo bash /tmp/sso-install.sh
+bash /tmp/sso-install.sh --online
 ```
 
-For published versions, prefer the versioned/tagged install path documented in the GitHub Release.
+The installer downloads the required SSO payload, validates it, and installs it under:
 
-### Local/offline install
+```text
+/root/simple-server-optimizer/
+```
 
-Clone or download the repository, then run:
+It also creates the command:
+
+```text
+/usr/local/bin/sso
+```
+
+After installation, SSO opens automatically. Later you can start it with:
 
 ```bash
-sudo bash install.sh
+sso
 ```
 
-v1.1.0 specifically fixes local payload discovery so the installer uses the directory that actually contains `install.sh`.
+> When a stable tagged release is published, prefer the versioned/tagged installation instructions in that GitHub Release instead of the development `main` branch.
 
-### Run SSO
+---
 
-After installation:
+# Offline / local installation — exact steps
+
+This is the recommended method when the target server has limited or blocked access to GitHub.
+
+## Important: do not download only `install.sh`
+
+A local installation needs the **complete SSO payload**, not only the installer file.
+
+At minimum the installer expects the application files under the same source directory, including:
+
+```text
+install.sh
+sso.sh
+modules/
+assets/
+```
+
+The safest and simplest approach is therefore to download the **entire repository Source ZIP** and upload the complete extracted folder.
+
+## Step 1 — Download SSO on your computer
+
+On a computer that has normal internet access:
+
+1. Open the SSO GitHub repository:
+   `ach1992/simple-server-optimizer`
+2. Click **Code**.
+3. Click **Download ZIP**.
+4. Extract the ZIP on your computer.
+
+For a published release, use the Source ZIP for that specific release/tag instead of `main`.
+
+After extraction, you will have a folder similar to:
+
+```text
+simple-server-optimizer-main/
+```
+
+or, for a tagged release, a similarly named versioned source folder.
+
+## Step 2 — Rename the extracted folder
+
+For clarity, rename the extracted folder on your computer to:
+
+```text
+sso-offline
+```
+
+You should now have a local folder whose structure looks approximately like this:
+
+```text
+sso-offline/
+├── install.sh
+├── sso.sh
+├── modules/
+│   ├── utils.sh
+│   ├── network.sh
+│   ├── cpu_irq.sh
+│   ├── firewall.sh
+│   ├── fail2ban.sh
+│   ├── rollback.sh
+│   └── uninstall.sh
+├── assets/
+│   ├── whitelist-default.ipv4
+│   └── blocklist-ip.ipv4
+├── README.md
+└── ...
+```
+
+Do **not** move `install.sh` out of this folder. The installer intentionally discovers the other local files relative to the directory containing `install.sh`.
+
+## Step 3 — Upload the entire folder to the server
+
+Using SFTP/SCP/FileZilla/WinSCP or your preferred file-transfer tool, upload the **whole `sso-offline` folder** to `/root`.
+
+The result on the server must be:
+
+```text
+/root/sso-offline/
+```
+
+and these files must exist, for example:
+
+```text
+/root/sso-offline/install.sh
+/root/sso-offline/sso.sh
+/root/sso-offline/modules/firewall.sh
+/root/sso-offline/assets/whitelist-default.ipv4
+```
+
+### Recommended layout
+
+Use this temporary upload directory:
+
+```text
+/root/sso-offline/
+```
+
+Do **not** manually use `/root/simple-server-optimizer/` as the upload/staging directory unless you specifically intend to adopt that directory in place. `/root/simple-server-optimizer/` is SSO's normal **final installed application directory**, so keeping the uploaded source in `/root/sso-offline/` makes the process much clearer and safer.
+
+## Step 4 — Run the local installer
+
+SSH to the server as root and run:
 
 ```bash
-sudo sso
+cd /root/sso-offline
+bash install.sh --local
 ```
 
-Normal `sso` usage is expected to **run the installed application only**. It should not download or update SSO just because you launched the menu.
+That is the complete offline installation command.
 
-### Update / reinstall
+The `--local` option explicitly tells the installer:
 
-Update is an explicit operator action. v1.1.0 will keep this flow simple: validate the required payload, preserve a straightforward previous-install fallback, replace the installed files, and report failures honestly.
+> use the files in the directory containing this `install.sh`; do not download the SSO application from GitHub.
 
-The exact published update command/path will be documented with the v1.1.0 release.
+The installer validates the local payload and Bash syntax before replacing the installed application.
 
-## Main paths
+## Step 5 — What the installer creates
 
-Common SSO-owned paths include:
+After a successful local install, the actual installed application is located at:
 
-- `/root/simple-server-optimizer/` — installed application;
-- `/etc/sso/` — persistent SSO state;
-- `/usr/local/bin/sso` — launcher;
-- `/etc/sysctl.d/99-sso-*.conf` — SSO-owned sysctl files;
-- `/usr/local/sbin/sso-*-restore` — restore helpers;
-- `/etc/systemd/system/sso-*.service` — persistence units;
-- `/root/simple-server-optimizer/backups` — current backup location.
+```text
+/root/simple-server-optimizer/
+```
 
-SSO should preserve unrelated operator configuration.
+The launcher is:
 
-## Firewall notes
+```text
+/usr/local/bin/sso
+```
 
-- SSO currently supports its existing IPv4-oriented host firewall behavior.
-- v1.1.0 focuses on validation, accurate failure reporting, and easier add/remove operations.
-- New routed `FORWARD` semantics, IPv6 firewall features, counters/search, and broader redesign are deferred.
-- Common BitTorrent-port blocking is best-effort port blocking, not complete protocol detection.
+Persistent SSO state is stored under:
 
-If another firewall manager is installed, review interactions before enabling SSO rules.
+```text
+/etc/sso/
+```
 
-## Fail2Ban notes
+Now start SSO with:
 
-SSO should use its own configuration/drop-in and must not overwrite unrelated operator `jail.local` configuration.
+```bash
+sso
+```
 
-Configuration should be validated before SSO restarts/reloads Fail2Ban when validation tooling is available.
+or explicitly:
 
-## Tuning notes
+```bash
+bash /root/simple-server-optimizer/sso.sh
+```
 
-SSO should not present fixed tuning values as universally optimal. v1.1.0 fixes current correctness/persistence defects; adaptive or protocol-specific tuning is deferred until real usage demonstrates a need.
+## Step 6 — Remove the temporary upload folder
 
-## Project direction
+After you have confirmed that `sso` starts correctly, the temporary uploaded source folder is no longer required:
 
-SSO intentionally stays **small, Bash-first, and practical**.
+```bash
+rm -rf /root/sso-offline
+```
 
-The priority is:
+This does **not** remove the installed SSO application. The installed copy remains under:
 
-1. easy operation;
-2. fix reproduced bugs;
-3. preserve unrelated system configuration;
-4. keep behavior understandable;
-5. add complexity only when a real operator problem justifies it.
+```text
+/root/simple-server-optimizer/
+```
 
-The live roadmap and release acceptance criteria are maintained in GitHub Issues.
+## Does offline installation need internet access?
 
-## Development and validation
+The SSO **local installation itself does not download the SSO application** when you use:
 
-Routine development uses:
+```bash
+bash install.sh --local
+```
+
+However, some features inside SSO may later install normal operating-system packages such as Fail2Ban or irqbalance. Those package-install actions still require working Debian/Ubuntu package repositories unless the required packages are already installed or you provide your own offline package source.
+
+---
+
+# Offline update / reinstall
+
+You can use exactly the same local method to update an existing SSO installation without relying on GitHub access from the server.
+
+1. Download the newer complete Source ZIP on another computer.
+2. Extract it.
+3. Rename the extracted folder to `sso-offline`.
+4. Upload it as `/root/sso-offline/`.
+5. Run:
+
+```bash
+cd /root/sso-offline
+bash install.sh --local
+```
+
+When replacing a recognized existing SSO installation, the installer keeps the previous application as a simple fallback at:
+
+```text
+/root/simple-server-optimizer.bak/
+```
+
+Existing SSO backup history is carried into the replacement installation.
+
+After confirming the update works:
+
+```bash
+sso
+```
+
+then you may remove the temporary upload folder:
+
+```bash
+rm -rf /root/sso-offline
+```
+
+---
+
+# Normal use
+
+Start the application with:
+
+```bash
+sso
+```
+
+Normal `sso` startup uses the files already installed under `/root/simple-server-optimizer/`.
+
+**Launching SSO does not automatically download or reinstall the project.**
+
+The main menu currently provides:
+
+```text
+1) System Check
+2) Network Optimizations
+3) CPU & IRQ Optimizations
+4) Firewall + Abuse Defender
+5) Fail2Ban
+6) Backups & Rollback
+7) Update
+8) Uninstall
+0) Exit
+```
+
+---
+
+# Updating from inside SSO
+
+Menu option **7) Update** performs an explicit **online** update/reinstall.
+
+Internally, SSO runs the installed installer using the online mode. Therefore this method requires the server to be able to reach the configured GitHub source.
+
+If GitHub/raw GitHub access is blocked on the server, do not use the online Update menu. Use the **Offline update / reinstall** procedure above instead.
+
+An update is separate from normal application startup: simply running `sso` does not trigger an update.
+
+---
+
+# Installed and persistent paths
+
+The main SSO-owned paths are:
+
+| Path | Purpose |
+| --- | --- |
+| `/root/simple-server-optimizer/` | installed SSO application |
+| `/root/simple-server-optimizer.bak/` | previous recognized application after an update/reinstall, when applicable |
+| `/root/simple-server-optimizer/backups/` | SSO backup history |
+| `/etc/sso/` | persistent SSO state |
+| `/usr/local/bin/sso` | command launcher |
+| `/etc/sysctl.d/99-sso-*.conf` | SSO-owned persistent sysctl configuration |
+| `/usr/local/sbin/sso-*-restore` | SSO restore helpers, when created by a feature |
+| `/etc/systemd/system/sso-*.service` | SSO persistence units, when created by a feature |
+
+SSO is designed to preserve unrelated operator-owned configuration instead of claiming whole system configuration files unnecessarily.
+
+---
+
+# Firewall behavior
+
+SSO currently provides an IPv4-oriented host firewall manager.
+
+The current stabilization work focuses on:
+
+- validating IPv4/CIDR list entries before apply;
+- rejecting invalid state clearly;
+- not reporting full success after required backend failures;
+- keeping whitelist priority over blocklist rules;
+- preserving the existing INPUT/OUTPUT policy scope;
+- making blacklist/whitelist add/remove update an already-active SSO nftables/ipset backend immediately;
+- keeping those list changes persisted;
+- using straightforward batching for larger lists.
+
+SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface are intentionally outside the current v1.1.0 scope.
+
+Common BitTorrent-port blocking is **best-effort port blocking**, not complete BitTorrent protocol detection.
+
+If another firewall manager is installed on the server, review how its rules interact with SSO before enabling SSO firewall rules.
+
+---
+
+# Fail2Ban behavior
+
+SSO manages its own Fail2Ban configuration/drop-in and should preserve unrelated operator configuration such as an existing `/etc/fail2ban/jail.local`.
+
+SSO validates its generated configuration before service mutation where the Fail2Ban validation tooling is available.
+
+The goal is to add or remove SSO-owned behavior without taking ownership of unrelated administrator configuration.
+
+---
+
+# CPU / IRQ / network tuning
+
+SSO includes helpers for:
+
+- fq + BBR;
+- basic TCP tuning;
+- irqbalance;
+- RPS;
+- RFS;
+- XPS.
+
+These are practical helpers, not a claim that one fixed set of values is universally optimal for every server or every VPN/proxy workload.
+
+The current v1.1.0 work focuses on correctness and persistence of existing behavior rather than adaptive tuning or protocol-specific profiles.
+
+---
+
+# Backup and rollback
+
+SSO can create and restore SSO-aware backups for the system state it manages.
+
+Backups are stored under:
+
+```text
+/root/simple-server-optimizer/backups/
+```
+
+The rollback menu lets you list available backups, restore the latest usable backup, or choose a specific usable backup.
+
+Rollback is intentionally scoped to state SSO knows how to manage; it is not a replacement for a full VPS/provider snapshot.
+
+---
+
+# Uninstall
+
+Use menu option:
+
+```text
+8) Uninstall (rollback + remove SSO)
+```
+
+The uninstall flow is designed to remove SSO-owned state while preserving unrelated operator-owned configuration where ownership can be determined safely.
+
+For important servers, a provider snapshot or console remains the best final safety net before large system changes.
+
+---
+
+# Current release focus: v1.1.0
+
+v1.1.0 is a **focused stabilization release**, not a major feature expansion.
+
+The work includes:
+
+- preserving operator-owned Fail2Ban configuration;
+- rollback/uninstall correctness fixes;
+- reliable local/offline installation;
+- normal `sso` launch using installed files without re-downloading;
+- explicit/simple update and reinstall behavior;
+- CPU/RPS persistence and correctness fixes;
+- firewall input validation and honest apply failures;
+- immediate active-backend blacklist/whitelist add/remove;
+- focused CI/regression coverage;
+- a simple release and real-server owner validation handoff.
+
+Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.0**.
+
+Future work will be selected from real usage and operator feedback.
+
+---
+
+# Development and validation
+
+Routine repository validation uses:
 
 ```bash
 bash -n install.sh sso.sh modules/*.sh
@@ -144,18 +457,26 @@ shellcheck --severity=error install.sh sso.sh modules/*.sh
 bash tests/run.sh
 ```
 
-Tests should not mutate the shared development host's real firewall, sysctl, systemd, Fail2Ban, or package state.
+Repository tests should not mutate a shared development host's real firewall, sysctl, systemd, Fail2Ban, package, or network state.
 
-GitHub Copilot review is not used for this repository. Review is proportional to the actual change; bounded fixes normally use focused regressions, CI, and developer/Master self-review.
+GitHub Copilot review is not used for this repository. Review depth is proportional to the actual change.
 
-## Project documentation
+---
 
-- [`PROJECT-SPEC.md`](PROJECT-SPEC.md) — durable project direction;
+# Project documentation
+
+- [`PROJECT-SPEC.md`](PROJECT-SPEC.md) — durable project direction and non-goals;
 - [`AGENTS.md`](AGENTS.md) — contributor/agent operating rules;
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — ownership/state boundaries;
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — development/test/release workflow;
-- GitHub Issues — current work and acceptance;
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — ownership and state boundaries;
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — development, validation, and release workflow;
+- GitHub Issues — current work and acceptance criteria;
 - Pull Requests / Git / CI — implementation and validation truth.
+
+Repository:
+
+`https://github.com/ach1992/simple-server-optimizer`
+
+---
 
 ## License
 
