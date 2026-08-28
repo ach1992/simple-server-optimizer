@@ -131,19 +131,29 @@ uninstall_restore_fail2ban_service() {
 }
 
 # Package ownership permits SSO to stop Fail2Ban, but only that marker-owned
-# path may do so. Stop the daemon while its package/unit still exist so normal
-# Fail2Ban actionstop cleanup can remove its live firewall state before purge.
-uninstall_fail2ban_service_is_inactive() {
+# path may do so. Treat lifecycle evidence as a tuple: loaded/masked units must
+# be positively inactive, while a not-found unit is accepted only with an
+# explicitly consistent absent-unit active state. Anything else fails closed.
+uninstall_fail2ban_lifecycle_is_safe() {
   command -v systemctl >/dev/null 2>&1 || return 1
 
   local load="" active=""
   load="$(systemd_load_state fail2ban.service)"
-  [[ -n "$load" ]] || return 1
   active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
 
-  case "$active" in
-    inactive|failed|unknown|not-found) return 0 ;;
-    *) return 1 ;;
+  case "$load" in
+    loaded|masked)
+      [[ "$active" == "inactive" ]]
+      ;;
+    not-found)
+      case "$active" in
+        inactive|unknown|not-found) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
@@ -152,24 +162,37 @@ uninstall_stop_owned_fail2ban_before_purge() {
 
   local load="" active=""
   load="$(systemd_load_state fail2ban.service)"
-  [[ -n "$load" ]] || return 1
   active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
 
-  case "$active" in
-    inactive|failed|unknown|not-found)
-      return 0
+  case "$load" in
+    loaded|masked)
+      case "$active" in
+        inactive)
+          ;;
+        active|activating|reloading|deactivating)
+          if ! run_step "Stopping SSO-installed Fail2Ban" systemctl stop fail2ban.service; then
+            return 1
+          fi
+          ;;
+        *)
+          return 1
+          ;;
+      esac
       ;;
-    active|activating|reloading|deactivating)
-      if ! run_step "Stopping SSO-installed Fail2Ban" systemctl stop fail2ban.service; then
-        return 1
-      fi
+    not-found)
+      case "$active" in
+        inactive|unknown|not-found) ;;
+        *) return 1 ;;
+      esac
       ;;
     *)
       return 1
       ;;
   esac
 
-  uninstall_fail2ban_service_is_inactive
+  # Re-read the tuple immediately before purge. A nominally successful stop or
+  # a transient first observation is not sufficient authorization to purge.
+  uninstall_fail2ban_lifecycle_is_safe
 }
 
 # Detect a real SSO RPS/RFS/XPS apply, not merely an empty namespaced test or
@@ -365,8 +388,8 @@ module_uninstall() {
       uninstall_abort_with_recovery "Fail2Ban was installed by SSO but package purge failed."
       return 0
     fi
-    if ! uninstall_fail2ban_service_is_inactive; then
-      uninstall_abort_with_recovery "Fail2Ban remained active or could not be verified inactive after package purge."
+    if ! uninstall_fail2ban_lifecycle_is_safe; then
+      uninstall_abort_with_recovery "Fail2Ban remained active or its lifecycle could not be proven safe after package purge."
       return 0
     fi
     if ! uninstall_remove_fail2ban_owned_state; then
