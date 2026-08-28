@@ -181,12 +181,17 @@ tcp_info() {
 }
 
 firewall_info() {
-  if cmd_exists nft; then
-    info "Firewall: nftables available"
+  if cmd_exists nft && nft list ruleset >/dev/null 2>&1; then
+    info "SSO firewall backend: nftables ready"
+  elif cmd_exists iptables && cmd_exists ipset; then
+    info "SSO firewall backend: iptables + ipset ready"
   elif cmd_exists iptables; then
-    info "Firewall: iptables available"
+    warn "SSO firewall backend not ready: iptables is present but ipset is missing."
+    info "Install ipset, then retry: apt-get update && apt-get install -y ipset"
+  elif cmd_exists nft; then
+    warn "SSO firewall backend not ready: nft is installed but not usable on this system."
   else
-    warn "Firewall tools not found"
+    warn "SSO firewall backend not ready: install usable nftables or iptables + ipset."
   fi
 }
 
