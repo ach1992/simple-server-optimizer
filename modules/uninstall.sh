@@ -156,17 +156,26 @@ uninstall_cpu_runtime_owned() {
   return 1
 }
 
-# A usable RPS snapshot is a pre-ownership baseline only when it positively
-# proves the SSO RPS sysctl file, CPU unit, and restore helper were all absent
-# before the captured runtime values were changed.
+# A usable RPS snapshot is a pre-ownership baseline only when it is a fully
+# certified current-format snapshot and positively proves the SSO RPS sysctl
+# file, CPU unit, and restore helper were all absent before runtime mutation.
 uninstall_cpu_runtime_snapshot_is_preownership() {
   local d="$1"
-  local tag="" load="" enabled="" active=""
+  local tag="" format="" load="" enabled="" active=""
+  local service_state_dir="$d/services/sso-cpuirq.service"
 
-  backup_is_usable_dir "$d" || return 1
-  tag="$(cat "$d/TAG" 2>/dev/null || true)"
-  [[ "$tag" == "cpu_irq:rps_rfs_xps" ]] || return 1
+  [[ -d "$d" && ! -L "$d" ]] || return 1
+  [[ ! -e "$d/INCOMPLETE" && ! -L "$d/INCOMPLETE" ]] || return 1
+  [[ -f "$d/TAG" && ! -L "$d/TAG" ]] || return 1
+  [[ -f "$d/FORMAT" && ! -L "$d/FORMAT" ]] || return 1
+  [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
+  tag="$(cat "$d/TAG" 2>/dev/null)" || return 1
+  format="$(cat "$d/FORMAT" 2>/dev/null)" || return 1
+  [[ "$tag" == "cpu_irq:rps_rfs_xps" && "$format" == "$SSO_BACKUP_FORMAT" ]] || return 1
 
+  [[ -d "$d/cpu_irq" && ! -L "$d/cpu_irq" ]] || return 1
+  [[ -d "$d/cpu_irq/runtime" && ! -L "$d/cpu_irq/runtime" ]] || return 1
+  [[ -d "$d/cpu_irq/runtime/queues" && ! -L "$d/cpu_irq/runtime/queues" ]] || return 1
   [[ -f "$d/cpu_irq/runtime/COMPLETE" && ! -L "$d/cpu_irq/runtime/COMPLETE" ]] || return 1
   [[ -f "$d/cpu_irq/runtime/nic" && ! -L "$d/cpu_irq/runtime/nic" ]] || return 1
   [[ -f "$d/cpu_irq/runtime/rps_sock_flow_entries" && ! -L "$d/cpu_irq/runtime/rps_sock_flow_entries" ]] || return 1
@@ -175,9 +184,13 @@ uninstall_cpu_runtime_snapshot_is_preownership() {
   [[ -f "$d/cpu_irq/sso-cpuirq.service.absent" && ! -L "$d/cpu_irq/sso-cpuirq.service.absent" ]] || return 1
   [[ -f "$d/cpu_irq/sso-cpuirq-restore.absent" && ! -L "$d/cpu_irq/sso-cpuirq-restore.absent" ]] || return 1
 
-  load="$(cat "$d/services/sso-cpuirq.service/load" 2>/dev/null || true)"
-  enabled="$(cat "$d/services/sso-cpuirq.service/enabled" 2>/dev/null || true)"
-  active="$(cat "$d/services/sso-cpuirq.service/active" 2>/dev/null || true)"
+  [[ -d "$service_state_dir" && ! -L "$service_state_dir" ]] || return 1
+  [[ -f "$service_state_dir/load" && ! -L "$service_state_dir/load" ]] || return 1
+  [[ -f "$service_state_dir/enabled" && ! -L "$service_state_dir/enabled" ]] || return 1
+  [[ -f "$service_state_dir/active" && ! -L "$service_state_dir/active" ]] || return 1
+  load="$(cat "$service_state_dir/load" 2>/dev/null)" || return 1
+  enabled="$(cat "$service_state_dir/enabled" 2>/dev/null)" || return 1
+  active="$(cat "$service_state_dir/active" 2>/dev/null)" || return 1
   [[ "$load" == "not-found" && "$enabled" == "not-found" && "$active" == "inactive" ]]
 }
 
