@@ -130,6 +130,48 @@ uninstall_restore_fail2ban_service() {
   backup_restore_service_state "$baseline" fail2ban.service 1
 }
 
+# Package ownership permits SSO to stop Fail2Ban, but only that marker-owned
+# path may do so. Stop the daemon while its package/unit still exist so normal
+# Fail2Ban actionstop cleanup can remove its live firewall state before purge.
+uninstall_fail2ban_service_is_inactive() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+
+  local load="" active=""
+  load="$(systemd_load_state fail2ban.service)"
+  [[ -n "$load" ]] || return 1
+  active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
+
+  case "$active" in
+    inactive|failed|unknown|not-found) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+uninstall_stop_owned_fail2ban_before_purge() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+
+  local load="" active=""
+  load="$(systemd_load_state fail2ban.service)"
+  [[ -n "$load" ]] || return 1
+  active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
+
+  case "$active" in
+    inactive|failed|unknown|not-found)
+      return 0
+      ;;
+    active|activating|reloading|deactivating)
+      if ! run_step "Stopping SSO-installed Fail2Ban" systemctl stop fail2ban.service; then
+        return 1
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  uninstall_fail2ban_service_is_inactive
+}
+
 # Detect a real SSO RPS/RFS/XPS apply, not merely an empty namespaced test or
 # stale placeholder. install/apply writes at least one of these recognizable
 # payloads before changing live queue state.
@@ -311,12 +353,20 @@ module_uninstall() {
     return 0
   fi
 
-  # 2) Package ownership is marker-driven. A failed purge is a hard stop: do
-  # not erase the marker/state needed for a safe retry. Never autoremove
+  # 2) Package ownership is marker-driven. A failed stop/purge is a hard stop:
+  # do not erase the marker/state needed for a safe retry. Never autoremove
   # unrelated dependency candidates as part of SSO ownership cleanup.
   if [[ "$f2b_installed_by_sso" == "1" ]]; then
+    if ! uninstall_stop_owned_fail2ban_before_purge; then
+      uninstall_abort_with_recovery "Could not stop and verify SSO-installed Fail2Ban before package purge."
+      return 0
+    fi
     if ! run_step "Removing Fail2Ban (purge)" apt-get purge -y fail2ban; then
       uninstall_abort_with_recovery "Fail2Ban was installed by SSO but package purge failed."
+      return 0
+    fi
+    if ! uninstall_fail2ban_service_is_inactive; then
+      uninstall_abort_with_recovery "Fail2Ban remained active or could not be verified inactive after package purge."
       return 0
     fi
     if ! uninstall_remove_fail2ban_owned_state; then
