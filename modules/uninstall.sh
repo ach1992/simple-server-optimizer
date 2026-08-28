@@ -340,6 +340,16 @@ module_uninstall() {
     return 0
   fi
 
+  # Fail before any runtime/package mutation when a previous-install path is
+  # present but cannot be positively identified as the installer-created SSO
+  # fallback. Re-check again immediately before recursive removal below.
+  if [[ -e "$previous_install" || -L "$previous_install" ]]; then
+    if ! uninstall_sso_payload_dir_is_recognized "$previous_install"; then
+      uninstall_abort_with_recovery "Previous install fallback is not a recognized SSO payload; refusing recursive removal: $previous_install"
+      return 0
+    fi
+  fi
+
   # Ownership baselines live outside the replaceable install tree. Retry the
   # conservative previous-install migration before making uninstall decisions;
   # never substitute "earliest retained active backup" for original ownership.
