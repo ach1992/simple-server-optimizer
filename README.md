@@ -1,77 +1,43 @@
 # Simple Server Optimizer (SSO)
 
-Simple Server Optimizer is a small, menu-driven Bash toolkit for **Debian / Ubuntu servers used primarily as VPN/proxy nodes**. It focuses on practical network tuning, firewall/abuse controls, persistence, diagnostics, and safe recovery without requiring a heavyweight management stack.
+Simple Server Optimizer is a **small, menu-driven Bash utility** for Debian/Ubuntu servers, especially VPN/proxy nodes.
 
-The project is intentionally conservative: tuning should be applied because it fits the detected server/workload, not because a kernel setting is popular in generic optimization guides.
+Its purpose is simple: make common tuning, firewall, Fail2Ban, backup/rollback, update, and uninstall tasks easier to run and easier to understand without requiring a heavyweight management stack.
 
-It is designed to be:
+The project deliberately prefers practical fixes over large architecture.
 
-- **Interactive** — simple menu-driven operation;
-- **Idempotent** — re-running supported operations should converge instead of stacking duplicate state;
-- **Persistent** — settings that must survive reboot are restored through explicit SSO-owned mechanisms;
-- **Reversible** — SSO-owned changes should have credible rollback/uninstall behavior;
-- **VPN/proxy aware** — project direction prioritizes the real needs of routed VPNs and proxy workloads.
+## What SSO currently does
 
-> ⚠️ SSO makes low-level network, kernel, firewall, service, and package changes as root. Keep snapshot/out-of-band console access when testing on important servers.
+- network/kernel tuning helpers;
+- CPU / IRQ / RPS / RFS / XPS helpers;
+- firewall blocklist/whitelist management;
+- Fail2Ban setup/integration;
+- backup and rollback;
+- update and uninstall;
+- `sso` launcher/menu.
 
----
+SSO runs low-level operations as root, so important servers should still have a snapshot or out-of-band console available when testing a new release.
 
-## Current Features
+## Current focus: v1.1.0
 
-The current codebase provides:
+v1.1.0 is a **focused stabilization release**. The goal is to fix problems in the current script, not turn SSO into a larger platform.
 
-- **Firewall automation**
-  - managed blocklist/whitelist state;
-  - nftables or iptables/ipset backend depending on availability;
-  - SSO-namespaced rules;
-  - reboot persistence through an SSO systemd restore service;
-  - common BitTorrent-port blocking as a best-effort port rule, not a complete P2P detector.
+Current release work is limited to:
 
-- **Fail2Ban helper**
-  - SSH-focused setup;
-  - optional nginx jail support;
-  - whitelist synchronization.
+- preserving operator-owned Fail2Ban configuration;
+- retaining the rollback/uninstall correctness fixes already integrated;
+- fixing local/offline install behavior;
+- making normal `sso` execution use installed files without re-downloading the project;
+- making update/reinstall explicit and simple;
+- fixing reproduced CPU/RPS persistence problems;
+- validating firewall input and preventing false-success;
+- making firewall add/remove quick and immediate where the active backend supports it;
+- keeping CI/regressions small and useful;
+- publishing v1.1.0 for real-server owner testing.
 
-- **Network tuning**
-  - fq + BBR activation when supported;
-  - TCP-related sysctl tuning.
+Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.0**.
 
-- **CPU / IRQ / RPS / RFS / XPS tuning**
-  - NIC detection;
-  - irqbalance helper;
-  - queue-related tuning and reboot persistence where supported.
-
-- **Backups, rollback, update, and uninstall**
-  - SSO-specific backup/restore paths;
-  - online/offline installer flow;
-  - launcher command (`sso`).
-
-### Current stabilization work
-
-The project is preparing **v1.1.0**, focused on correctness and safety before larger VPN-aware features are added. This includes repairing known Fail2Ban, rollback/uninstall, installer/update, CPU persistence, and firewall validation/performance issues and establishing automated regression checks.
-
-Current work, acceptance criteria, and dependencies live in GitHub Issues rather than in this README.
-
----
-
-## Project Direction
-
-SSO is evolving from a generic server-tuning script into a **safe, adaptive VPN/proxy server optimizer and abuse-protection toolkit**.
-
-After the v1.1.0 stabilization release and real-server owner validation, planned areas include:
-
-- firewall scopes that explicitly understand `INPUT`, `OUTPUT`, and routed `FORWARD` traffic;
-- IPv4 + IPv6 firewall sets;
-- faster atomic/bulk firewall list management;
-- firewall counters/search/explainability;
-- a read-only **VPN Doctor** for MTU/PMTU, forwarding, conntrack, queue/drop, congestion-control, and firewall health;
-- protocol-aware recommendations/profiles for WireGuard, OpenVPN, Xray/VLESS/Reality, Hysteria/TUIC/QUIC, and mixed nodes;
-- adaptive rather than fixed RPS/RFS/XPS/TCP/UDP tuning;
-- managed abuse/blocklist operations with provenance, diff, and rollback where useful.
-
-The roadmap is tracked in GitHub Issues so live status is not duplicated into documentation.
-
----
+Future work will be chosen after real use shows what is actually valuable.
 
 ## Supported OS
 
@@ -82,183 +48,114 @@ Current documented targets:
 
 Other distributions are not targeted by design.
 
-Version support is a compatibility contract. Changes to this list should be backed by actual validation of the packages/commands/kernel behavior used by SSO.
-
----
-
 ## Quick Start
 
-### Option A: online installer
+### Online install
 
-Current `main` installer:
+For the current development baseline:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh -o /tmp/sso-install.sh \
-  && sudo bash /tmp/sso-install.sh
+curl -fsSL https://raw.githubusercontent.com/ach1992/simple-server-optimizer/main/install.sh -o /tmp/sso-install.sh
+sudo bash /tmp/sso-install.sh
 ```
 
-> Security note: the v1.1.0 stabilization work is replacing mutable-branch-only update trust with an immutable release + integrity-verification model. For important production systems, prefer a reviewed release once v1.1.0 is published.
+For published versions, prefer the versioned/tagged install path documented in the GitHub Release.
 
-### Option B: local/offline install
+### Local/offline install
 
-Clone or download the repository, then:
+Clone or download the repository, then run:
 
 ```bash
 sudo bash install.sh
 ```
 
-The v1.1.0 stabilization work includes fixing local payload detection so this path reliably uses the actual directory containing the installer payload.
+v1.1.0 specifically fixes local payload discovery so the installer uses the directory that actually contains `install.sh`.
 
-### Run after installation
+### Run SSO
+
+After installation:
 
 ```bash
 sudo sso
 ```
 
-Direct path:
+Normal `sso` usage is expected to **run the installed application only**. It should not download or update SSO just because you launched the menu.
 
-```bash
-sudo bash /root/simple-server-optimizer/sso.sh
-```
+### Update / reinstall
 
----
+Update is an explicit operator action. v1.1.0 will keep this flow simple: validate the required payload, preserve a straightforward previous-install fallback, replace the installed files, and report failures honestly.
 
-## Interactive Input / TTY
+The exact published update command/path will be documented with the v1.1.0 release.
 
-Piping an interactive installer directly into Bash can cause `read` to consume piped stdin in many scripts. SSO attempts to read interactive input from `/dev/tty` when available.
+## Main paths
 
-The most predictable pattern is still:
+Common SSO-owned paths include:
 
-```bash
-curl -fsSL <URL> -o /tmp/installer.sh
-sudo bash /tmp/installer.sh
-```
-
----
-
-## Persistence
-
-### Firewall
-
-Common SSO-owned artifacts:
-
-- `/usr/local/sbin/sso-firewall-restore`
-- `/etc/systemd/system/sso-firewall.service`
-
-Check:
-
-```bash
-systemctl is-enabled sso-firewall.service
-systemctl status sso-firewall.service
-```
-
-### CPU / IRQ / RPS / RFS / XPS
-
-Common SSO-owned artifacts:
-
-- `/usr/local/sbin/sso-cpuirq-restore`
-- `/etc/systemd/system/sso-cpuirq.service`
-- `/etc/sysctl.d/99-sso-rps.conf`
-
-Check:
-
-```bash
-systemctl is-enabled sso-cpuirq.service
-systemctl status sso-cpuirq.service
-```
-
----
-
-## Firewall Notes
-
-- SSO currently detects nftables first and may fall back to iptables/ipset.
-- SSO uses namespaced firewall objects and should not assume ownership of unrelated firewall policy.
-- Current v1.0 behavior primarily manages host `INPUT`/`OUTPUT`; explicit VPN routed-traffic (`FORWARD`) coverage is planned after the v1.1.0 stabilization/test gate.
-- The existing “BitTorrent” option blocks common ports only and must be treated as best-effort abuse reduction, not complete protocol detection.
-
-If you maintain another firewall manager, review interactions carefully before enabling SSO rules.
-
----
-
-## BBR Check
-
-```bash
-sysctl net.ipv4.tcp_congestion_control
-sysctl net.core.default_qdisc
-```
-
-SSO's future tuning direction is workload-aware: TCP settings are not assumed to optimize UDP/routed VPN traffic automatically.
-
----
-
-## State and Owned Paths
-
-Common SSO paths include:
-
-- `/etc/sso/` — persistent SSO runtime state;
-- `/etc/sysctl.d/99-sso-*.conf` — SSO-owned sysctl drop-ins;
+- `/root/simple-server-optimizer/` — installed application;
+- `/etc/sso/` — persistent SSO state;
 - `/usr/local/bin/sso` — launcher;
+- `/etc/sysctl.d/99-sso-*.conf` — SSO-owned sysctl files;
 - `/usr/local/sbin/sso-*-restore` — restore helpers;
 - `/etc/systemd/system/sso-*.service` — persistence units;
 - `/root/simple-server-optimizer/backups` — current backup location.
 
-SSO should preserve unrelated operator configuration. See `docs/ARCHITECTURE.md` for ownership and rollback boundaries.
+SSO should preserve unrelated operator configuration.
 
----
+## Firewall notes
 
-## Troubleshooting
+- SSO currently supports its existing IPv4-oriented host firewall behavior.
+- v1.1.0 focuses on validation, accurate failure reporting, and easier add/remove operations.
+- New routed `FORWARD` semantics, IPv6 firewall features, counters/search, and broader redesign are deferred.
+- Common BitTorrent-port blocking is best-effort port blocking, not complete protocol detection.
 
-### Menu input does nothing
+If another firewall manager is installed, review interactions before enabling SSO rules.
 
-Run from an interactive root-capable shell:
+## Fail2Ban notes
+
+SSO should use its own configuration/drop-in and must not overwrite unrelated operator `jail.local` configuration.
+
+Configuration should be validated before SSO restarts/reloads Fail2Ban when validation tooling is available.
+
+## Tuning notes
+
+SSO should not present fixed tuning values as universally optimal. v1.1.0 fixes current correctness/persistence defects; adaptive or protocol-specific tuning is deferred until real usage demonstrates a need.
+
+## Project direction
+
+SSO intentionally stays **small, Bash-first, and practical**.
+
+The priority is:
+
+1. easy operation;
+2. fix reproduced bugs;
+3. preserve unrelated system configuration;
+4. keep behavior understandable;
+5. add complexity only when a real operator problem justifies it.
+
+The live roadmap and release acceptance criteria are maintained in GitHub Issues.
+
+## Development and validation
+
+Routine development uses:
 
 ```bash
-sudo sso
+bash -n install.sh sso.sh modules/*.sh
+shellcheck --severity=error install.sh sso.sh modules/*.sh
+bash tests/run.sh
 ```
 
-If `/dev/tty` is unavailable, interactive input cannot behave normally.
+Tests should not mutate the shared development host's real firewall, sysctl, systemd, Fail2Ban, or package state.
 
-### Firewall rules disappear after reboot
+GitHub Copilot review is not used for this repository. Review is proportional to the actual change; bounded fixes normally use focused regressions, CI, and developer/Master self-review.
 
-```bash
-systemctl is-enabled sso-firewall.service
-systemctl status sso-firewall.service
-```
+## Project documentation
 
-### NIC detection issues
-
-The current implementation uses the default route where possible and falls back to the first suitable non-loopback interface. Multi-interface/VPN-aware detection will become more explicit as the VPN Doctor/profile work is implemented.
-
----
-
-## Security & Safety
-
-- Use snapshots/backups where possible before testing a release on an important server.
-- Keep out-of-band console access when changing firewall/network settings remotely.
-- Do not treat a successful command exit as proof that a complex firewall/configuration change fully applied; SSO's stabilization work is adding stronger validation/verification for these paths.
-- Do not hardcode credentials or private service data into SSO configuration or repository files.
-
----
-
-## Project Documentation
-
-Routine development/recovery should use the source closest to the question:
-
-- [`AGENTS.md`](AGENTS.md) — contributor/agent operating rules and recovery entry;
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — implementation ownership, mutation, firewall, tuning, rollback, and test boundaries;
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — development, validation, CI, review, and release workflow;
-- GitHub Issues — live roadmap, priorities, dependencies, acceptance, and release work;
+- [`PROJECT-SPEC.md`](PROJECT-SPEC.md) — durable project direction;
+- [`AGENTS.md`](AGENTS.md) — contributor/agent operating rules;
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — ownership/state boundaries;
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — development/test/release workflow;
+- GitHub Issues — current work and acceptance;
 - Pull Requests / Git / CI — implementation and validation truth.
-
-`PROJECT-SPEC.md` is the bootstrap specification used to establish project direction and these derived systems. It is not part of normal session recovery unless project-level intent itself becomes unclear or changes.
-
----
-
-## Contributing
-
-Before substantive work, read `AGENTS.md` and the active GitHub Issue, then follow `docs/DEVELOPMENT.md`.
-
----
 
 ## License
 
