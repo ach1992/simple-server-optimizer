@@ -136,7 +136,7 @@ For a future release:
 
 The release process does not require a custom immutable-release workflow, runtime tag resolver, or bespoke supply-chain implementation unless a future accepted requirement demonstrates that need.
 
-`v1.1.0` completed this process successfully and is the current published stabilization baseline.
+`v1.1.0` completed this process as the stabilization baseline. `v1.1.1` is the next patch release, packaging the already-integrated post-v1.1.0 usability work from Issue #37 without changing the v1.1.0 safety contract.
 
 ## 11. Owner test handoff
 
