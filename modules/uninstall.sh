@@ -130,6 +130,71 @@ uninstall_restore_fail2ban_service() {
   backup_restore_service_state "$baseline" fail2ban.service 1
 }
 
+# Package ownership permits SSO to stop Fail2Ban, but only that marker-owned
+# path may do so. Treat lifecycle evidence as a tuple: loaded/masked units must
+# be positively inactive, while a not-found unit is accepted only with an
+# explicitly consistent absent-unit active state. Anything else fails closed.
+uninstall_fail2ban_lifecycle_is_safe() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+
+  local load="" active=""
+  load="$(systemd_load_state fail2ban.service)"
+  active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
+
+  case "$load" in
+    loaded|masked)
+      [[ "$active" == "inactive" ]]
+      ;;
+    not-found)
+      case "$active" in
+        inactive|unknown|not-found) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+uninstall_stop_owned_fail2ban_before_purge() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+
+  local load="" active=""
+  load="$(systemd_load_state fail2ban.service)"
+  active="$(systemctl is-active fail2ban.service 2>/dev/null || true)"
+
+  case "$load" in
+    loaded|masked)
+      case "$active" in
+        inactive)
+          ;;
+        active|activating|reloading|deactivating)
+          if ! run_step "Stopping SSO-installed Fail2Ban" systemctl stop fail2ban.service; then
+            return 1
+          fi
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    not-found)
+      case "$active" in
+        inactive|unknown|not-found) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  # Re-read the tuple immediately before purge. A nominally successful stop or
+  # a transient first observation is not sufficient authorization to purge.
+  uninstall_fail2ban_lifecycle_is_safe
+}
+
 # Detect a real SSO RPS/RFS/XPS apply, not merely an empty namespaced test or
 # stale placeholder. install/apply writes at least one of these recognizable
 # payloads before changing live queue state.
@@ -311,12 +376,20 @@ module_uninstall() {
     return 0
   fi
 
-  # 2) Package ownership is marker-driven. A failed purge is a hard stop: do
-  # not erase the marker/state needed for a safe retry. Never autoremove
+  # 2) Package ownership is marker-driven. A failed stop/purge is a hard stop:
+  # do not erase the marker/state needed for a safe retry. Never autoremove
   # unrelated dependency candidates as part of SSO ownership cleanup.
   if [[ "$f2b_installed_by_sso" == "1" ]]; then
+    if ! uninstall_stop_owned_fail2ban_before_purge; then
+      uninstall_abort_with_recovery "Could not stop and verify SSO-installed Fail2Ban before package purge."
+      return 0
+    fi
     if ! run_step "Removing Fail2Ban (purge)" apt-get purge -y fail2ban; then
       uninstall_abort_with_recovery "Fail2Ban was installed by SSO but package purge failed."
+      return 0
+    fi
+    if ! uninstall_fail2ban_lifecycle_is_safe; then
+      uninstall_abort_with_recovery "Fail2Ban remained active or its lifecycle could not be proven safe after package purge."
       return 0
     fi
     if ! uninstall_remove_fail2ban_owned_state; then
