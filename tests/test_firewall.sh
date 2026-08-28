@@ -197,6 +197,45 @@ test_nft_reapply_replaces_existing_sso_table() (
   [[ "$(grep -c '^delete table inet sso$' "$log")" -eq 1 ]] || return 1
 )
 
+test_import_updates_state_without_enabling_firewall() (
+  local t
+  t="$(mktemp -d)" || return 1
+  setup_firewall_test "$t"
+  printf '8.8.8.8\n1.1.1.0/24\n' > "$ASSET_BLOCKLIST"
+
+  header() { :; }
+  section() { :; }
+  pause() { :; }
+  backup_create() { printf '%s\n' "$t/backup"; }
+  cmd_exists() { return 1; }
+  firewall_persist_enable() {
+    touch "$t/persist-called"
+    return 0
+  }
+
+  module_firewall_import_blocklist >/dev/null || return 1
+  grep -qx '8.8.8.8' "$STATE_BLOCKLIST" || return 1
+  grep -qx '1.1.1.0/24' "$STATE_BLOCKLIST" || return 1
+  [[ ! -e "$t/persist-called" ]] || return 1
+)
+
+test_status_distinguishes_available_from_active_backend() (
+  local t output
+  t="$(mktemp -d)" || return 1
+  setup_firewall_test "$t"
+  : > "$STATE_BLOCKLIST"
+
+  header() { :; }
+  section() { :; }
+  pause() { :; }
+  detect_firewall_backend() { printf '%s\n' nft; }
+  firewall_active_backend() { printf '%s\n' none; }
+
+  output="$(module_firewall_status)" || return 1
+  printf '%s\n' "$output" | grep -Fq 'Available backend: nft' || return 1
+  printf '%s\n' "$output" | grep -Fq 'SSO firewall: not active' || return 1
+)
+
 run_test "repository firewall lists contain valid IPv4/CIDR entries" test_repository_lists_are_valid
 run_test "invalid stored firewall entries are rejected before apply" test_invalid_state_is_rejected_before_apply
 run_test "nft backend failures propagate instead of false-success" test_nft_backend_failure_propagates
@@ -206,4 +245,6 @@ run_test "active nft blacklist add persists and applies immediately" test_active
 run_test "runtime update failure restores the persisted list" test_runtime_failure_restores_persisted_list
 run_test "active ipset whitelist removal applies immediately" test_active_ipset_whitelist_remove_is_immediate
 run_test "re-applying nft rules replaces the existing SSO table" test_nft_reapply_replaces_existing_sso_table
+run_test "blocklist import updates saved state without enabling firewall" test_import_updates_state_without_enabling_firewall
+run_test "firewall status distinguishes available from active backend" test_status_distinguishes_available_from_active_backend
 finish_tests
