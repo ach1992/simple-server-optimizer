@@ -14,6 +14,9 @@ make_fixture() {
   : > "$tmp/backups/recovery.marker"
   : > "$tmp/install/sso.sh"
   : > "$tmp/bin/sso"
+  : > "$tmp/systemd/sso-cpuirq.service"
+  : > "$tmp/sysctl/99-sso-rps.conf"
+  : > "$tmp/sbin/sso-cpuirq-restore"
   : > "$tmp/sysctl/operator.conf"
 }
 
@@ -71,6 +74,9 @@ recognized_previous_install_is_removed_on_success() {
   [[ ! -e "$tmp/backups" ]] || rc=1
   [[ ! -e "$tmp/install" ]] || rc=1
   [[ ! -e "$tmp/bin/sso" ]] || rc=1
+  [[ ! -e "$tmp/systemd/sso-cpuirq.service" ]] || rc=1
+  [[ ! -e "$tmp/sysctl/99-sso-rps.conf" ]] || rc=1
+  [[ ! -e "$tmp/sbin/sso-cpuirq-restore" ]] || rc=1
   [[ -f "$tmp/sysctl/operator.conf" ]] || rc=1
   rm -rf "$tmp"
   return "$rc"
@@ -91,6 +97,9 @@ unrecognized_previous_install_blocks_destructive_completion() {
   [[ -f "$tmp/backups/recovery.marker" ]] || rc=1
   [[ -f "$tmp/install/sso.sh" ]] || rc=1
   [[ -f "$tmp/bin/sso" ]] || rc=1
+  [[ -f "$tmp/systemd/sso-cpuirq.service" ]] || rc=1
+  [[ -f "$tmp/sysctl/99-sso-rps.conf" ]] || rc=1
+  [[ -f "$tmp/sbin/sso-cpuirq-restore" ]] || rc=1
   rm -rf "$tmp"
   return "$rc"
 }
@@ -112,6 +121,9 @@ symlink_previous_install_blocks_destructive_completion() {
   [[ -f "$tmp/backups/recovery.marker" ]] || rc=1
   [[ -f "$tmp/install/sso.sh" ]] || rc=1
   [[ -f "$tmp/bin/sso" ]] || rc=1
+  [[ -f "$tmp/systemd/sso-cpuirq.service" ]] || rc=1
+  [[ -f "$tmp/sysctl/99-sso-rps.conf" ]] || rc=1
+  [[ -f "$tmp/sbin/sso-cpuirq-restore" ]] || rc=1
   rm -rf "$tmp"
   return "$rc"
 }
@@ -158,7 +170,7 @@ previous_install_remove_failure_preserves_recovery() {
 }
 
 run_test "recognized previous SSO install fallback is removed by full uninstall" recognized_previous_install_is_removed_on_success
-run_test "unrecognized previous-install directory blocks destructive completion" unrecognized_previous_install_blocks_destructive_completion
-run_test "symlink previous-install path blocks destructive completion" symlink_previous_install_blocks_destructive_completion
+run_test "unrecognized previous-install directory blocks destructive completion before cleanup" unrecognized_previous_install_blocks_destructive_completion
+run_test "symlink previous-install path blocks destructive completion before cleanup" symlink_previous_install_blocks_destructive_completion
 run_test "previous-install removal failure preserves recovery state" previous_install_remove_failure_preserves_recovery
 finish_tests
