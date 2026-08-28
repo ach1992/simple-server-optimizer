@@ -194,6 +194,111 @@ backup_restore_network_runtime() {
   return "$failed"
 }
 
+backup_capture_cpu_runtime() {
+  local d="$1"
+  local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
+  local runtime_dir="$d/cpu_irq/runtime"
+  local nic value f queue knob
+
+  nic="$(detect_nic)" || return 1
+  [[ "$nic" =~ ^[[:alnum:]_.:-]+$ ]] || return 1
+  [[ -d "$net_root/$nic/queues" ]] || return 1
+  command -v sysctl >/dev/null 2>&1 || return 1
+
+  mkdir -p "$runtime_dir/queues" || return 1
+  printf '%s\n' "$nic" > "$runtime_dir/nic" || return 1
+
+  value="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null)" || return 1
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$value" > "$runtime_dir/rps_sock_flow_entries" || return 1
+
+  for f in \
+    "$net_root/$nic"/queues/rx-*/rps_cpus \
+    "$net_root/$nic"/queues/rx-*/rps_flow_cnt \
+    "$net_root/$nic"/queues/tx-*/xps_cpus; do
+    [[ -e "$f" ]] || continue
+    queue="$(basename "$(dirname "$f")")" || return 1
+    knob="$(basename "$f")" || return 1
+    case "$queue:$knob" in
+      rx-[0-9]*:rps_cpus|rx-[0-9]*:rps_flow_cnt|tx-[0-9]*:xps_cpus) ;;
+      *) return 1 ;;
+    esac
+    value="$(cat "$f" 2>/dev/null)" || return 1
+    case "$knob" in
+      rps_cpus|xps_cpus) [[ "$value" =~ ^[0-9A-Fa-f,]+$ ]] || return 1 ;;
+      rps_flow_cnt) [[ "$value" =~ ^[0-9]+$ ]] || return 1 ;;
+    esac
+    mkdir -p "$runtime_dir/queues/$queue" || return 1
+    printf '%s\n' "$value" > "$runtime_dir/queues/$queue/$knob" || return 1
+  done
+
+  : > "$runtime_dir/COMPLETE" || return 1
+}
+
+backup_restore_cpu_runtime() {
+  local d="$1"
+  local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
+  local runtime_dir="$d/cpu_irq/runtime"
+  local nic value captured rel queue knob target actual
+  local failed=0
+
+  [[ -f "$runtime_dir/COMPLETE" && ! -L "$runtime_dir/COMPLETE" ]] || return 2
+  [[ -f "$runtime_dir/nic" && -f "$runtime_dir/rps_sock_flow_entries" ]] || return 1
+
+  nic="$(cat "$runtime_dir/nic" 2>/dev/null)" || return 1
+  [[ "$nic" =~ ^[[:alnum:]_.:-]+$ ]] || return 1
+  [[ -d "$net_root/$nic/queues" ]] || return 1
+  command -v sysctl >/dev/null 2>&1 || return 1
+
+  value="$(cat "$runtime_dir/rps_sock_flow_entries" 2>/dev/null)" || return 1
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  if ! sysctl -w "net.core.rps_sock_flow_entries=$value" >/dev/null 2>&1; then
+    warn "Could not restore net.core.rps_sock_flow_entries=$value."
+    failed=1
+  else
+    actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
+    [[ "$actual" == "$value" ]] || failed=1
+  fi
+
+  while IFS= read -r captured; do
+    [[ -n "$captured" ]] || continue
+    rel="${captured#"$runtime_dir/queues/"}"
+    queue="${rel%%/*}"
+    knob="${rel#*/}"
+    [[ "$queue" != "$rel" && "$knob" != */* ]] || return 1
+    case "$queue:$knob" in
+      rx-[0-9]*:rps_cpus|rx-[0-9]*:rps_flow_cnt|tx-[0-9]*:xps_cpus) ;;
+      *) return 1 ;;
+    esac
+
+    target="$net_root/$nic/queues/$queue/$knob"
+    if [[ ! -e "$target" ]]; then
+      warn "Captured CPU queue target is no longer present: $target"
+      failed=1
+      continue
+    fi
+
+    value="$(cat "$captured" 2>/dev/null)" || return 1
+    case "$knob" in
+      rps_cpus|xps_cpus) [[ "$value" =~ ^[0-9A-Fa-f,]+$ ]] || return 1 ;;
+      rps_flow_cnt) [[ "$value" =~ ^[0-9]+$ ]] || return 1 ;;
+    esac
+
+    if ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
+      warn "Could not restore CPU queue value: $target"
+      failed=1
+      continue
+    fi
+    actual="$(cat "$target" 2>/dev/null || true)"
+    if [[ "$actual" != "$value" ]]; then
+      warn "CPU queue value did not verify after restore: $target"
+      failed=1
+    fi
+  done < <(find "$runtime_dir/queues" -mindepth 2 -maxdepth 2 -type f -print 2>/dev/null | sort)
+
+  return "$failed"
+}
+
 backup_firewall_runtime_state() {
   local inspected=0
   local nft_active=0 iptables_active=0 ipset_active=0
@@ -377,6 +482,7 @@ backup_create() {
     || ! backup_capture_qdisc "$d" \
     || ! backup_capture_firewall "$d" \
     || ! backup_capture_cpu_irq "$d" \
+    || { [[ "$tag" == "cpu_irq:rps_rfs_xps" ]] && ! backup_capture_cpu_runtime "$d"; } \
     || ! backup_capture_state "$d" \
     || ! backup_capture_fail2ban "$d" \
     || ! backup_capture_services "$d"; then
@@ -991,6 +1097,19 @@ restore_from_dir() {
       warn "Legacy backup has no CPU service lifecycle evidence; leaving service lifecycle unchanged."
     else
       err "Rollback could not safely restore sso-cpuirq.service state."
+      return 1
+    fi
+  fi
+
+  local cpu_runtime_rc=0 snapshot_tag=""
+  backup_restore_cpu_runtime "$d" || cpu_runtime_rc=$?
+  if [[ "$cpu_runtime_rc" == "1" ]]; then
+    err "Rollback could not fully restore the captured RPS/RFS/XPS runtime state."
+    return 1
+  elif [[ "$cpu_runtime_rc" == "2" ]]; then
+    snapshot_tag="$(cat "$d/TAG" 2>/dev/null || true)"
+    if [[ "$snapshot_tag" == "cpu_irq:rps_rfs_xps" ]]; then
+      err "This older RPS/RFS/XPS backup has no captured CPU queue runtime state; refusing to report a complete rollback."
       return 1
     fi
   fi
