@@ -146,7 +146,7 @@ backup_capture_cpu_runtime() {
   local d="$1" inventory="${CPU_IRQ_MANAGED_INVENTORY_FILE:-}"
   local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
   local runtime_dir="$d/cpu_irq/runtime"
-  local nic value rel queue knob target
+  local nic value rel queue knob target parent
 
   [[ -n "$inventory" && -f "$inventory" && ! -L "$inventory" ]] || return 1
   nic="$(detect_nic)" || return 1
@@ -171,7 +171,8 @@ backup_capture_cpu_runtime() {
       *) return 1 ;;
     esac
     target="$net_root/$nic/queues/$rel"
-    [[ -f "$target" && ! -L "$target" ]] || return 1
+    parent="$(dirname "$target")" || return 1
+    [[ -f "$target" && ! -L "$target" && -d "$parent" && ! -L "$parent" ]] || return 1
     value="$(cat "$target" 2>/dev/null)" || return 1
     cpu_irq_queue_value_is_valid "$knob" "$value" || return 1
     mkdir -p "$runtime_dir/queues/$queue" || return 1
@@ -187,8 +188,8 @@ backup_capture_cpu_runtime() {
 backup_restore_cpu_runtime() {
   local d="$1" net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
   local runtime_dir="$d/cpu_irq/runtime"
-  local nic expected_global captured rel queue knob target value actual path
-  local failed=0 captured_count=0 current_count=0 declared_count=0 strict_topology=1
+  local nic expected_global captured rel queue knob target value actual path parent snapshot_rel
+  local failed=0 captured_count=0 current_count=0 declared_count=0 strict_topology=1 restore_global=1
   local -A captured_inventory=() declared_inventory=()
 
   [[ -f "$runtime_dir/COMPLETE" && ! -L "$runtime_dir/COMPLETE" ]] || return 2
@@ -196,20 +197,44 @@ backup_restore_cpu_runtime() {
   [[ -f "$d/FORMAT" && ! -L "$d/FORMAT" ]] || return 1
   [[ "$(cat "$d/FORMAT" 2>/dev/null || true)" == "$SSO_BACKUP_FORMAT" ]] || return 1
   [[ -f "$d/COMPLETE" && ! -L "$d/COMPLETE" ]] || return 1
+  [[ -d "$d/cpu_irq" && ! -L "$d/cpu_irq" ]] || return 1
+  [[ -d "$runtime_dir" && ! -L "$runtime_dir" ]] || return 1
   [[ -f "$runtime_dir/nic" && ! -L "$runtime_dir/nic" ]] || return 1
   [[ -f "$runtime_dir/rps_sock_flow_entries" && ! -L "$runtime_dir/rps_sock_flow_entries" ]] || return 1
   [[ -d "$runtime_dir/queues" && ! -L "$runtime_dir/queues" ]] || return 1
 
   nic="$(cat "$runtime_dir/nic" 2>/dev/null)" || return 1
   [[ "$nic" =~ ^[[:alnum:]_.:-]+$ && -d "$net_root/$nic/queues" ]] || return 1
-  command -v sysctl >/dev/null 2>&1 || return 1
   expected_global="$(cat "$runtime_dir/rps_sock_flow_entries" 2>/dev/null)" || return 1
   [[ "$expected_global" =~ ^[0-9]+$ ]] || return 1
 
+  # Reject unexpected objects, symlinks, and malformed snapshot structure before
+  # considering any live write. This preserves the strict corruption guards from
+  # the original v2 runtime restore while allowing a smaller managed inventory.
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    snapshot_rel="${path#"$runtime_dir/queues/"}"
+    case "$snapshot_rel" in
+      rx-[0-9]*/rps_cpus|rx-[0-9]*/rps_flow_cnt|tx-[0-9]*/xps_cpus)
+        parent="$(dirname "$path")" || return 1
+        [[ -f "$path" && ! -L "$path" && -d "$parent" && ! -L "$parent" ]] || return 1
+        ;;
+      rx-[0-9]*|tx-[0-9]*)
+        [[ -d "$path" && ! -L "$path" ]] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(find "$runtime_dir/queues" -mindepth 1 -maxdepth 2 -print 2>/dev/null | LC_ALL=C sort)
+
   while IFS= read -r captured; do
-    [[ -n "$captured" && -f "$captured" && ! -L "$captured" ]] || continue
+    [[ -n "$captured" ]] || continue
+    [[ -f "$captured" && ! -L "$captured" ]] || return 1
+    parent="$(dirname "$captured")" || return 1
+    [[ -d "$parent" && ! -L "$parent" ]] || return 1
     rel="${captured#"$runtime_dir/queues/"}"
-    queue="${rel%%/*}"; knob="${rel#*/}"
+    queue="${rel%%/*}"
+    knob="${rel#*/}"
+    [[ "$queue" != "$rel" && "$knob" != */* ]] || return 1
     case "$queue:$knob" in
       rx-[0-9]*:rps_cpus|rx-[0-9]*:rps_flow_cnt|tx-[0-9]*:xps_cpus) ;;
       *) return 1 ;;
@@ -225,34 +250,49 @@ backup_restore_cpu_runtime() {
   if [[ -e "$runtime_dir/managed-queues" || -L "$runtime_dir/managed-queues" ]]; then
     [[ -f "$runtime_dir/managed-queues" && ! -L "$runtime_dir/managed-queues" ]] || return 1
     strict_topology=0
+    restore_global=0
     while IFS= read -r rel; do
       [[ -n "$rel" ]] || continue
       [[ -n "${captured_inventory[$rel]+x}" && -z "${declared_inventory[$rel]+x}" ]] || return 1
       declared_inventory["$rel"]=1
       declared_count=$((declared_count + 1))
+      [[ "$rel" == rx-*/rps_flow_cnt ]] && restore_global=1
     done < "$runtime_dir/managed-queues"
     [[ "$declared_count" -eq "$captured_count" ]] || return 1
   fi
 
+  if [[ "$restore_global" -eq 1 ]]; then
+    command -v sysctl >/dev/null 2>&1 || return 1
+  fi
+
+  # Validate every target SSO intends to restore before the first live write.
   for rel in "${!captured_inventory[@]}"; do
     target="$net_root/$nic/queues/$rel"
-    [[ -f "$target" && ! -L "$target" ]] || return 1
+    parent="$(dirname "$target")" || return 1
+    [[ -f "$target" && ! -L "$target" && -d "$parent" && ! -L "$parent" ]] || return 1
   done
 
   if [[ "$strict_topology" -eq 1 ]]; then
     for path in "$net_root/$nic"/queues/rx-*/rps_cpus "$net_root/$nic"/queues/rx-*/rps_flow_cnt "$net_root/$nic"/queues/tx-*/xps_cpus; do
       [[ -e "$path" || -L "$path" ]] || continue
-      [[ -f "$path" && ! -L "$path" ]] || return 1
+      parent="$(dirname "$path")" || return 1
+      [[ -f "$path" && ! -L "$path" && -d "$parent" && ! -L "$parent" ]] || return 1
       rel="${path#"$net_root/$nic/queues/"}"
+      case "$rel" in
+        rx-[0-9]*/rps_cpus|rx-[0-9]*/rps_flow_cnt|tx-[0-9]*/xps_cpus) ;;
+        *) return 1 ;;
+      esac
       [[ -n "${captured_inventory[$rel]+x}" ]] || return 1
       current_count=$((current_count + 1))
     done
     [[ "$current_count" -eq "$captured_count" ]] || return 1
   fi
 
-  if ! sysctl -w "net.core.rps_sock_flow_entries=$expected_global" >/dev/null 2>&1; then
-    warn "Could not restore net.core.rps_sock_flow_entries=$expected_global."
-    failed=1
+  if [[ "$restore_global" -eq 1 ]]; then
+    if ! sysctl -w "net.core.rps_sock_flow_entries=$expected_global" >/dev/null 2>&1; then
+      warn "Could not restore net.core.rps_sock_flow_entries=$expected_global."
+      failed=1
+    fi
   fi
 
   for rel in "${!captured_inventory[@]}"; do
@@ -267,8 +307,10 @@ backup_restore_cpu_runtime() {
     [[ "$actual" == "$value" ]] || failed=1
   done
 
-  actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
-  [[ "$actual" == "$expected_global" ]] || failed=1
+  if [[ "$restore_global" -eq 1 ]]; then
+    actual="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
+    [[ "$actual" == "$expected_global" ]] || failed=1
+  fi
   for rel in "${!captured_inventory[@]}"; do
     value="$(cat "$runtime_dir/queues/$rel" 2>/dev/null)" || return 1
     actual="$(cat "$net_root/$nic/queues/$rel" 2>/dev/null || true)"
@@ -316,6 +358,23 @@ rfs_any=false
 rfs_failed=false
 xps_any=false
 xps_failed=false
+preflight_failed=false
+
+for rel in "${managed_queue_paths[@]}"; do
+  target="/sys/class/net/$nic/queues/$rel"
+  case "$rel" in
+    rx-*/rps_cpus|rx-*/rps_flow_cnt|tx-*/xps_cpus) ;;
+    *) warn "Invalid managed CPU queue path: $rel"; preflight_failed=true; continue ;;
+  esac
+  if [[ ! -f "$target" || -L "$target" ]]; then
+    warn "Managed CPU queue target is unavailable: $target"
+    preflight_failed=true
+  fi
+done
+if [[ "$preflight_failed" == true ]]; then
+  warn "CPU queue restore was not applied because the managed queue inventory changed."
+  exit 1
+fi
 
 for rel in "${managed_queue_paths[@]}"; do
   [[ "$rel" == rx-*/rps_flow_cnt ]] && rfs_any=true
@@ -334,9 +393,8 @@ for rel in "${managed_queue_paths[@]}"; do
     rx-*/rps_cpus) rps_any=true; value="$mask" ;;
     rx-*/rps_flow_cnt) rfs_any=true; value="$RPS_FLOW_CNT" ;;
     tx-*/xps_cpus) xps_any=true; value="$mask" ;;
-    *) warn "Ignoring invalid managed CPU queue path: $rel"; queue_failed=true; continue ;;
   esac
-  if [[ ! -f "$target" || -L "$target" ]] || ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
+  if ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
     queue_failed=true
     case "$rel" in
       rx-*/rps_cpus) rps_failed=true ;;
@@ -370,8 +428,22 @@ EOS
 cpu_irq_apply_managed_inventory() {
   local nic="$1" inventory="$2" mask="$3"
   local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
-  local rel target value queue_failed=false
+  local rel target value queue_failed=false preflight_failed=false
   local rps_any=false rps_failed=false rfs_any=false rfs_failed=false xps_any=false xps_failed=false
+
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    target="$net_root/$nic/queues/$rel"
+    case "$rel" in
+      rx-*/rps_cpus|rx-*/rps_flow_cnt|tx-*/xps_cpus) ;;
+      *) warn "Invalid managed CPU queue path: $rel"; preflight_failed=true; continue ;;
+    esac
+    if [[ ! -f "$target" || -L "$target" ]]; then
+      warn "Managed CPU queue target is unavailable: $target"
+      preflight_failed=true
+    fi
+  done < "$inventory"
+  [[ "$preflight_failed" == false ]] || return 1
 
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
@@ -380,9 +452,8 @@ cpu_irq_apply_managed_inventory() {
       rx-*/rps_cpus) rps_any=true; value="$mask" ;;
       rx-*/rps_flow_cnt) rfs_any=true; value="$RPS_FLOW_CNT" ;;
       tx-*/xps_cpus) xps_any=true; value="$mask" ;;
-      *) queue_failed=true; warn "Ignoring invalid managed CPU queue path: $rel"; continue ;;
     esac
-    if [[ ! -f "$target" || -L "$target" ]] || ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
+    if ! printf '%s\n' "$value" > "$target" 2>/dev/null; then
       queue_failed=true
       case "$rel" in
         rx-*/rps_cpus) rps_failed=true ;;
@@ -450,12 +521,14 @@ module_cpu_irq_apply_rps() {
   fi
 
   if ! cpu_irq_write_restore_helper "$nic" "$inventory"; then
-    persistence_failed=1; persistence_ready=0
+    persistence_failed=1
+    persistence_ready=0
     warn "Could not write the CPU/IRQ restore helper."
   fi
 
   if ! mkdir -p "$systemd_dir"; then
-    persistence_failed=1; persistence_ready=0
+    persistence_failed=1
+    persistence_ready=0
     warn "Could not prepare the systemd unit directory."
   elif [[ "$persistence_ready" -eq 1 ]]; then
     unit_tmp="$(mktemp "$systemd_dir/.sso-cpuirq.service.XXXXXX")" || { persistence_failed=1; persistence_ready=0; }
@@ -475,9 +548,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF_UNIT
       then
-        persistence_failed=1; persistence_ready=0
+        persistence_failed=1
+        persistence_ready=0
       elif ! mv -f -- "$unit_tmp" "$systemd_dir/sso-cpuirq.service"; then
-        persistence_failed=1; persistence_ready=0
+        persistence_failed=1
+        persistence_ready=0
       fi
       if [[ "$persistence_ready" -eq 0 ]]; then
         rm -f -- "$unit_tmp" 2>/dev/null || true
@@ -487,11 +562,13 @@ EOF_UNIT
   fi
 
   if [[ "$persistence_ready" -eq 1 ]] && ! run_step "Reloading systemd units" systemctl daemon-reload; then
-    persistence_failed=1; persistence_ready=0
+    persistence_failed=1
+    persistence_ready=0
     warn "systemd daemon-reload failed."
   fi
   if [[ "$persistence_ready" -eq 1 ]] && ! run_step "Enabling SSO CPU/IRQ service" systemctl enable --now sso-cpuirq.service; then
-    persistence_failed=1; persistence_ready=0
+    persistence_failed=1
+    persistence_ready=0
     warn "Could not enable sso-cpuirq.service; reboot persistence is not confirmed."
   fi
   if [[ "$persistence_ready" -eq 0 ]]; then
