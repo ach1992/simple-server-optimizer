@@ -70,7 +70,7 @@ After installation, SSO opens automatically. Later you can start it with:
 sso
 ```
 
-> Stable release `v1.1.1` packages the post-v1.1.0 usability improvements while preserving the v1.1.0 safety baseline. For an exact immutable `v1.1.1` installation/update, use the Source ZIP or tarball from the [`v1.1.1` GitHub Release](https://github.com/ach1992/simple-server-optimizer/releases/tag/v1.1.1), extract the complete source tree, and run `bash install.sh --local`. The `--online` channel follows the current `main` branch.
+> Stable release `v1.1.2` adds capability-aware RPS/RFS/XPS handling for VPS/virtio hosts while preserving the v1.1.x safety and usability baseline. For an exact immutable `v1.1.2` installation/update, use the Source ZIP or tarball from the [`v1.1.2` GitHub Release](https://github.com/ach1992/simple-server-optimizer/releases/tag/v1.1.2), extract the complete source tree, and run `bash install.sh --local`. The `--online` channel follows the current `main` branch.
 
 ---
 
@@ -364,7 +364,7 @@ On a server without internet/package-repository access, provide `ipset` through 
 
 Importing the bundled blocklist only updates SSO's saved list. It does **not** install firewall packages and does **not** activate SSO firewall rules. Use **Apply/refresh SSO firewall rules** explicitly after a usable backend is available.
 
-The published `v1.1.1` patch release preserves the v1.1.0 firewall safety baseline and adds the post-v1.1.0 usability improvements:
+The `v1.1.1` firewall usability work remains unchanged in `v1.1.2`:
 
 - validating IPv4/CIDR list entries before apply;
 - accepting one or many blacklist/whitelist IPv4/CIDR entries separated by commas and/or whitespace;
@@ -382,7 +382,7 @@ The published `v1.1.1` patch release preserves the v1.1.0 firewall safety baseli
 
 The explicit **Apply/refresh SSO firewall rules** action remains for initial activation, explicit refresh/recovery, and intentionally staged state.
 
-SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface remain outside the v1.1.1 scope.
+SSO does not currently try to become a complete firewall platform. New routed `FORWARD` semantics and new IPv6 firewall feature surface remain outside the current scope.
 
 Common BitTorrent-port blocking is **best-effort port blocking**, not complete BitTorrent protocol detection.
 
@@ -413,7 +413,9 @@ SSO includes helpers for:
 
 These are practical helpers, not a claim that one fixed set of values is universally optimal for every server or every VPN/proxy workload.
 
-The v1.1.0 stabilization baseline continues to define correctness and persistence expectations for these existing tuning features; v1.1.1 does not broaden them into adaptive tuning or protocol-specific profiles.
+Starting with `v1.1.2`, RPS, RFS, and XPS are handled as independent capability classes. SSO manages a class only when its currently exposed queue controls have readable pre-change values. If, for example, a virtio NIC exposes an unreadable `xps_cpus`, XPS is skipped while supported RPS/RFS can still be backed up, applied, persisted, and later restored.
+
+The reboot helper is pinned to the exact NIC and queue-control inventory managed during apply. A control that was skipped is not silently picked up on a later reboot. New capability-aware snapshots restore only that captured inventory; legacy snapshots retain the stricter topology guard used by earlier releases.
 
 ---
 
@@ -447,21 +449,22 @@ For important servers, a provider snapshot or console remains the best final saf
 
 ---
 
-# Current published release: v1.1.1
+# Current release: v1.1.2
 
-`v1.1.1` is a focused patch release that packages the post-v1.1.0 operator usability work from Issue #37 without expanding the underlying firewall policy surface.
+`v1.1.2` is a focused compatibility patch built from real Debian 12 / virtio operator feedback.
 
-The v1.1.1 delta includes:
+The v1.1.2 delta includes:
 
-- clearer inline input guidance and examples;
-- more consistent semantic color/status treatment across the CLI;
-- bulk blacklist/whitelist add/remove with comma/whitespace input, deduplication, and full-batch validation;
-- atomic rejection of invalid/protected whitelist removal batches;
-- immediate active-backend list application with compact result summaries and fail-closed rollback behavior;
-- immediate active-firewall BitTorrent common-port toggle application with rollback on live-apply failure;
-- preserving explicit Apply/refresh for activation/recovery/staged state;
-- no silent activation of an inactive firewall;
-- no new IPv6/FORWARD/DPI semantics.
+- correct UI/version identification as `v1.1.2`;
+- actionable handling of unreadable CPU queue controls instead of an opaque menu exit;
+- independent capability detection for RPS, RFS, and XPS;
+- supported RPS/RFS tuning even when XPS is unsupported or unreadable;
+- exact managed NIC/queue inventory captured for rollback and pinned into reboot persistence;
+- skipped controls remaining untouched on apply, reboot, rollback, and uninstall;
+- backward-compatible strict restore behavior for legacy CPU runtime snapshots;
+- focused regression coverage for partial capability capture, persistence, and restore.
+
+`v1.1.1` remains the CLI/firewall usability patch that delivered bulk list editing, clearer guidance/colors, immediate active-backend list updates, and immediate BitTorrent-port toggle application without broadening firewall policy semantics.
 
 The v1.1.0 release remains the stabilization baseline that delivered:
 
@@ -479,7 +482,7 @@ The v1.1.0 release remains the stabilization baseline that delivered:
 - focused CI/regression coverage;
 - completed real-server owner validation and published GitHub Release.
 
-Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.1**.
+Large transactional installer frameworks, custom supply-chain systems, VPN Doctor, adaptive tuning, protocol profiles, new IPv6/FORWARD firewall features, and similar expansion are **not part of v1.1.2**.
 
 Future work will be selected from reproduced defects, compatibility needs, real usage, and operator feedback rather than an automatic expansion roadmap.
 
