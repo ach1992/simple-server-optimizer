@@ -22,10 +22,24 @@ partial_ignores_unmanaged_unreadable_xps(){
   rm -rf "$tmp"; return "$rc"
 }
 
+rps_only_restore_does_not_touch_unmanaged_global(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=5; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=777; backup_restore_cpu_runtime "$tmp/backup"; [[ "$RPS_GLOBAL" == 777 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 0 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
+}
+
 missing_managed_target_fails_before_write(){
   local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
   local rc=0
   ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; rm -f "$tmp/net/test0/queues/rx-0/rps_flow_cnt"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; x=0; backup_restore_cpu_runtime "$tmp/backup" || x=$?; [[ "$x" == 1 ]]; [[ "$RPS_GLOBAL" == 65536 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 3 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
+}
+
+corrupt_snapshot_symlink_fails_before_write(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; rm -f "$tmp/backup/cpu_irq/runtime/queues/rx-0/rps_cpus"; ln -s /dev/null "$tmp/backup/cpu_irq/runtime/queues/rx-0/rps_cpus"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; x=0; backup_restore_cpu_runtime "$tmp/backup" || x=$?; [[ "$x" == 1 ]]; [[ "$RPS_GLOBAL" == 65536 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 3 ]] ) || rc=$?
   rm -rf "$tmp"; return "$rc"
 }
 
@@ -47,7 +61,9 @@ missing_complete_returns_two(){ local tmp; tmp="$(mktemp -d)"; mkdir -p "$tmp/cp
 
 run_test "full RPS/RFS/XPS runtime values round-trip" full_round_trip
 run_test "partial snapshot ignores unmanaged unreadable XPS" partial_ignores_unmanaged_unreadable_xps
+run_test "RPS-only restore leaves unmanaged global RFS state untouched" rps_only_restore_does_not_touch_unmanaged_global
 run_test "missing managed target fails before writes" missing_managed_target_fails_before_write
+run_test "corrupt captured symlink fails before runtime writes" corrupt_snapshot_symlink_fails_before_write
 run_test "new partial snapshot ignores extra unmanaged queues" extra_unmanaged_queue_allowed_for_new_snapshot
 run_test "legacy snapshot keeps strict topology guard" legacy_snapshot_keeps_strict_topology
 run_test "runtime restore requires COMPLETE marker" missing_complete_returns_two
