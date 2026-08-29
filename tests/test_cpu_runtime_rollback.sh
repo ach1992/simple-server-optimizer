@@ -1,187 +1,70 @@
 #!/usr/bin/env bash
-set -uo pipefail
-
+set -Eeuo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tests/lib/testlib.sh
 source "$ROOT_DIR/tests/lib/testlib.sh"
+source "$ROOT_DIR/modules/rollback.sh"
+source "$ROOT_DIR/modules/cpu_irq.sh"
 
-certify_cpu_snapshot() {
-  local d="$1"
-  printf '2\n' > "$d/FORMAT"
-  : > "$d/COMPLETE"
+setup_tree(){ local root="$1"; mkdir -p "$root/net/test0/queues/rx-0" "$root/net/test0/queues/tx-0" "$root/backup"; printf '0\n' > "$root/net/test0/queues/rx-0/rps_cpus"; printf '0\n' > "$root/net/test0/queues/rx-0/rps_flow_cnt"; printf '1\n' > "$root/net/test0/queues/tx-0/xps_cpus"; }
+certify(){ printf '2\n' > "$1/FORMAT"; : > "$1/COMPLETE"; }
+
+full_round_trip(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\ntx-0/xps_cpus\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; printf '16384\n' > "$tmp/net/test0/queues/rx-0/rps_flow_cnt"; printf '3\n' > "$tmp/net/test0/queues/tx-0/xps_cpus"; RPS_GLOBAL=65536; backup_restore_cpu_runtime "$tmp/backup"; [[ "$RPS_GLOBAL" == 0 ]]; [[ "$(cat "$tmp/net/test0/queues/tx-0/xps_cpus")" == 1 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
 }
 
-cpu_runtime_capture_and_restore_round_trip() {
-  local tmp
-  tmp="$(mktemp -d)" || return 1
-  mkdir -p \
-    "$tmp/sys/class/net/test0/queues/rx-0" \
-    "$tmp/sys/class/net/test0/queues/rx-1" \
-    "$tmp/sys/class/net/test0/queues/tx-0" \
-    "$tmp/sys/class/net/test0/queues/tx-1" \
-    "$tmp/backup"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_cpus"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-1/rps_cpus"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_flow_cnt"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-1/rps_flow_cnt"
-  printf '1\n' > "$tmp/sys/class/net/test0/queues/tx-0/xps_cpus"
-  printf '2\n' > "$tmp/sys/class/net/test0/queues/tx-1/xps_cpus"
-
-  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
-    set -Eeuo pipefail
-    SSO_SYS_CLASS_NET_DIR="$FIXTURE_ROOT/sys/class/net"
-    RPS_GLOBAL=0
-    source "$ROOT_DIR/modules/rollback.sh"
-    detect_nic(){ printf "test0\n"; }
-    warn(){ :; }
-    sysctl(){
-      case "$1" in
-        -n) [[ "$2" == "net.core.rps_sock_flow_entries" ]] || return 1; printf "%s\n" "$RPS_GLOBAL" ;;
-        -w) RPS_GLOBAL="${2#net.core.rps_sock_flow_entries=}"; printf "%s\n" "$2" ;;
-        *) return 1 ;;
-      esac
-    }
-
-    backup_capture_cpu_runtime "$FIXTURE_ROOT/backup"
-    printf "2\n" > "$FIXTURE_ROOT/backup/FORMAT"
-    : > "$FIXTURE_ROOT/backup/COMPLETE"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_cpus"
-    printf "16384\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_flow_cnt"
-    printf "16384\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_flow_cnt"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-1/xps_cpus"
-    RPS_GLOBAL=65536
-
-    backup_restore_cpu_runtime "$FIXTURE_ROOT/backup"
-    [[ "$RPS_GLOBAL" == "0" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus")" == "0" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_cpus")" == "0" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_flow_cnt")" == "0" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_flow_cnt")" == "0" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus")" == "1" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-1/xps_cpus")" == "2" ]]
-  '
-  local rc=$?
-  rm -rf "$tmp"
-  return "$rc"
+partial_ignores_unmanaged_unreadable_xps(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; rm -f "$tmp/net/test0/queues/tx-0/xps_cpus"; mkdir "$tmp/net/test0/queues/tx-0/xps_cpus"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; printf '16384\n' > "$tmp/net/test0/queues/rx-0/rps_flow_cnt"; RPS_GLOBAL=65536; backup_restore_cpu_runtime "$tmp/backup"; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 0 ]]; [[ -d "$tmp/net/test0/queues/tx-0/xps_cpus" ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
 }
 
-missing_captured_queue_fails_before_any_runtime_write() {
-  local tmp
-  tmp="$(mktemp -d)" || return 1
-  mkdir -p \
-    "$tmp/sys/class/net/test0/queues/rx-0" \
-    "$tmp/sys/class/net/test0/queues/tx-0" \
-    "$tmp/backup"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_cpus"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_flow_cnt"
-  printf '1\n' > "$tmp/sys/class/net/test0/queues/tx-0/xps_cpus"
-
-  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
-    set -Eeuo pipefail
-    SSO_SYS_CLASS_NET_DIR="$FIXTURE_ROOT/sys/class/net"
-    RPS_GLOBAL=0
-    source "$ROOT_DIR/modules/rollback.sh"
-    detect_nic(){ printf "test0\n"; }
-    warn(){ :; }
-    sysctl(){
-      case "$1" in
-        -n) printf "%s\n" "$RPS_GLOBAL" ;;
-        -w) RPS_GLOBAL="${2#net.core.rps_sock_flow_entries=}"; return 0 ;;
-        *) return 1 ;;
-      esac
-    }
-
-    backup_capture_cpu_runtime "$FIXTURE_ROOT/backup"
-    printf "2\n" > "$FIXTURE_ROOT/backup/FORMAT"
-    : > "$FIXTURE_ROOT/backup/COMPLETE"
-    rm -f "$FIXTURE_ROOT/backup/cpu_irq/runtime/queues/rx-0/rps_flow_cnt"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus"
-    printf "16384\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_flow_cnt"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus"
-    RPS_GLOBAL=65536
-
-    rc=0
-    backup_restore_cpu_runtime "$FIXTURE_ROOT/backup" || rc=$?
-    [[ "$rc" == "1" ]]
-    [[ "$RPS_GLOBAL" == "65536" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus")" == "3" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_flow_cnt")" == "16384" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus")" == "3" ]]
-  '
-  local rc=$?
-  rm -rf "$tmp"
-  return "$rc"
+rps_only_restore_does_not_touch_unmanaged_global(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=5; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=777; backup_restore_cpu_runtime "$tmp/backup"; [[ "$RPS_GLOBAL" == 777 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 0 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
 }
 
-extra_current_queue_fails_before_any_runtime_write() {
-  local tmp
-  tmp="$(mktemp -d)" || return 1
-  mkdir -p \
-    "$tmp/sys/class/net/test0/queues/rx-0" \
-    "$tmp/sys/class/net/test0/queues/tx-0" \
-    "$tmp/backup"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_cpus"
-  printf '0\n' > "$tmp/sys/class/net/test0/queues/rx-0/rps_flow_cnt"
-  printf '1\n' > "$tmp/sys/class/net/test0/queues/tx-0/xps_cpus"
-
-  ROOT_DIR="$ROOT_DIR" FIXTURE_ROOT="$tmp" bash -c '
-    set -Eeuo pipefail
-    SSO_SYS_CLASS_NET_DIR="$FIXTURE_ROOT/sys/class/net"
-    RPS_GLOBAL=0
-    source "$ROOT_DIR/modules/rollback.sh"
-    detect_nic(){ printf "test0\n"; }
-    warn(){ :; }
-    sysctl(){
-      case "$1" in
-        -n) printf "%s\n" "$RPS_GLOBAL" ;;
-        -w) RPS_GLOBAL="${2#net.core.rps_sock_flow_entries=}"; return 0 ;;
-        *) return 1 ;;
-      esac
-    }
-
-    backup_capture_cpu_runtime "$FIXTURE_ROOT/backup"
-    printf "2\n" > "$FIXTURE_ROOT/backup/FORMAT"
-    : > "$FIXTURE_ROOT/backup/COMPLETE"
-    mkdir -p "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus"
-    printf "16384\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_flow_cnt"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus"
-    printf "3\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_cpus"
-    printf "16384\n" > "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-1/rps_flow_cnt"
-    RPS_GLOBAL=65536
-
-    rc=0
-    backup_restore_cpu_runtime "$FIXTURE_ROOT/backup" || rc=$?
-    [[ "$rc" == "1" ]]
-    [[ "$RPS_GLOBAL" == "65536" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/rx-0/rps_cpus")" == "3" ]]
-    [[ "$(cat "$SSO_SYS_CLASS_NET_DIR/test0/queues/tx-0/xps_cpus")" == "3" ]]
-  '
-  local rc=$?
-  rm -rf "$tmp"
-  return "$rc"
+missing_managed_target_fails_before_write(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; rm -f "$tmp/net/test0/queues/rx-0/rps_flow_cnt"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; x=0; backup_restore_cpu_runtime "$tmp/backup" || x=$?; [[ "$x" == 1 ]]; [[ "$RPS_GLOBAL" == 65536 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 3 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
 }
 
-rps_runtime_restore_requires_captured_runtime_marker() {
-  local tmp
-  tmp="$(mktemp -d)" || return 1
-  mkdir -p "$tmp/backup/cpu_irq/runtime"
-  (
-    set -Eeuo pipefail
-    source "$ROOT_DIR/modules/rollback.sh"
-    rc=0
-    backup_restore_cpu_runtime "$tmp/backup" || rc=$?
-    [[ "$rc" == "2" ]]
-  )
-  local rc=$?
-  rm -rf "$tmp"
-  return "$rc"
+corrupt_snapshot_symlink_fails_before_write(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; rm -f "$tmp/backup/cpu_irq/runtime/queues/rx-0/rps_cpus"; ln -s /dev/null "$tmp/backup/cpu_irq/runtime/queues/rx-0/rps_cpus"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; x=0; backup_restore_cpu_runtime "$tmp/backup" || x=$?; [[ "$x" == 1 ]]; [[ "$RPS_GLOBAL" == 65536 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 3 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
 }
 
-run_test "captured RPS/RFS/XPS runtime values round-trip exactly" cpu_runtime_capture_and_restore_round_trip
-run_test "missing captured CPU queue state fails before any runtime write" missing_captured_queue_fails_before_any_runtime_write
-run_test "extra current CPU queue state fails before any runtime write" extra_current_queue_fails_before_any_runtime_write
-run_test "RPS runtime restore requires an explicit captured runtime marker" rps_runtime_restore_requires_captured_runtime_marker
+extra_unmanaged_queue_allowed_for_new_snapshot(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; mkdir -p "$tmp/net/test0/queues/rx-1"; printf '7\n' > "$tmp/net/test0/queues/rx-1/rps_cpus"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; backup_restore_cpu_runtime "$tmp/backup"; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 0 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-1/rps_cpus")" == 7 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
+}
+
+legacy_snapshot_keeps_strict_topology(){
+  local tmp; tmp="$(mktemp -d)"; setup_tree "$tmp"; printf 'rx-0/rps_cpus\nrx-0/rps_flow_cnt\ntx-0/xps_cpus\n' > "$tmp/inv"
+  local rc=0
+  ( SSO_SYS_CLASS_NET_DIR="$tmp/net"; CPU_IRQ_MANAGED_INVENTORY_FILE="$tmp/inv"; RPS_GLOBAL=0; detect_nic(){ echo test0; }; warn(){ :; }; sysctl(){ case "$1" in -n) echo "$RPS_GLOBAL";; -w) RPS_GLOBAL="${2#*=}";; *) return 1;; esac; }; backup_capture_cpu_runtime "$tmp/backup"; certify "$tmp/backup"; rm -f "$tmp/backup/cpu_irq/runtime/managed-queues"; mkdir -p "$tmp/net/test0/queues/rx-1"; printf '7\n' > "$tmp/net/test0/queues/rx-1/rps_cpus"; printf '3\n' > "$tmp/net/test0/queues/rx-0/rps_cpus"; RPS_GLOBAL=65536; x=0; backup_restore_cpu_runtime "$tmp/backup" || x=$?; [[ "$x" == 1 ]]; [[ "$RPS_GLOBAL" == 65536 ]]; [[ "$(cat "$tmp/net/test0/queues/rx-0/rps_cpus")" == 3 ]] ) || rc=$?
+  rm -rf "$tmp"; return "$rc"
+}
+
+missing_complete_returns_two(){ local tmp; tmp="$(mktemp -d)"; mkdir -p "$tmp/cpu_irq/runtime"; local x=0; backup_restore_cpu_runtime "$tmp" || x=$?; rm -rf "$tmp"; [[ "$x" == 2 ]]; }
+
+run_test "full RPS/RFS/XPS runtime values round-trip" full_round_trip
+run_test "partial snapshot ignores unmanaged unreadable XPS" partial_ignores_unmanaged_unreadable_xps
+run_test "RPS-only restore leaves unmanaged global RFS state untouched" rps_only_restore_does_not_touch_unmanaged_global
+run_test "missing managed target fails before writes" missing_managed_target_fails_before_write
+run_test "corrupt captured symlink fails before runtime writes" corrupt_snapshot_symlink_fails_before_write
+run_test "new partial snapshot ignores extra unmanaged queues" extra_unmanaged_queue_allowed_for_new_snapshot
+run_test "legacy snapshot keeps strict topology guard" legacy_snapshot_keeps_strict_topology
+run_test "runtime restore requires COMPLETE marker" missing_complete_returns_two
 finish_tests

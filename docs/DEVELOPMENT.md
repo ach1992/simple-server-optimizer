@@ -88,13 +88,21 @@ For the current firewall manager, focus on:
 
 Use a backend batch path when it is already simple and materially avoids obvious per-entry overhead, but do not redesign the firewall subsystem solely for theoretical scale or concurrency.
 
-## 7. Fail2Ban validation
+## 7. CPU queue capability validation
+
+RPS, RFS, and XPS are capability classes, not an all-or-nothing bundle. For a queue-control class to be managed, every currently exposed control in that class must have a readable and valid pre-change value.
+
+When one class is unsupported or unreadable, SSO may skip it while continuing with independently safe classes. The exact managed NIC and queue-control inventory must be pinned into persistence, and rollback/uninstall must restore only the captured inventory. Legacy backups created before capability-aware persistence retain their strict topology restore guard.
+
+Do not silently write an unbacked queue control merely to make a tuning action appear successful.
+
+## 8. Fail2Ban validation
 
 SSO must write only its own configuration/drop-in and preserve unrelated operator configuration.
 
 When Fail2Ban validation tooling is available, validate before restart/reload.
 
-## 8. Review standard
+## 9. Review standard
 
 GitHub Copilot review must not be used for this repository.
 
@@ -110,7 +118,7 @@ Independent review is **optional and proportional**, not a blanket rule. Use a f
 
 Do not create an independent-review packet for a bounded change merely because the script executes as root.
 
-## 9. CI
+## 10. CI
 
 CI should remain small and high-signal:
 
@@ -120,7 +128,7 @@ CI should remain small and high-signal:
 
 Do not add large matrices, caches, or release/security machinery unless a real compatibility or defect pattern justifies them.
 
-## 10. Release readiness
+## 11. Release readiness
 
 For a future release:
 
@@ -136,9 +144,9 @@ For a future release:
 
 The release process does not require a custom immutable-release workflow, runtime tag resolver, or bespoke supply-chain implementation unless a future accepted requirement demonstrates that need.
 
-`v1.1.0` completed this process as the stabilization baseline. `v1.1.1` is the next patch release, packaging the already-integrated post-v1.1.0 usability work from Issue #37 without changing the v1.1.0 safety contract.
+`v1.1.0` established the stabilization baseline. `v1.1.1` packaged the post-v1.1.0 CLI/firewall usability work. `v1.1.2` is the bounded compatibility patch that makes CPU queue tuning capability-aware on hosts such as Debian/virtio systems with unreadable XPS controls, while preserving rollback for every control SSO actually manages.
 
-## 11. Owner test handoff
+## 12. Owner test handoff
 
 When a future release needs real-server validation, keep the owner checklist concise and practical. Depending on the changed surface, it may include:
 
@@ -151,4 +159,4 @@ When a future release needs real-server validation, keep the owner checklist con
 - exercise rollback/uninstall as appropriate;
 - return the exact failing command/output/log if something breaks.
 
-The `v1.1.0` real-server validation is complete. Future feature work should still be driven by demonstrated operator need rather than an automatic expansion roadmap.
+The `v1.1.0` real-server validation is complete. Later maintenance should still be driven by demonstrated operator need rather than an automatic expansion roadmap.

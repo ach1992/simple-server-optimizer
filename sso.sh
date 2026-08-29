@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SSO_VERSION="1.1.0"
+SSO_VERSION="1.1.2"
 SSO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MODULES_DIR="$SSO_DIR/modules"
 ASSETS_DIR="$SSO_DIR/assets"
@@ -10,7 +10,7 @@ BACKUP_DIR_BASE="/root/simple-server-optimizer/backups"
 
 source "$MODULES_DIR/utils.sh"
 
-VERSION="${SSO_VERSION:-1.1.0}"
+VERSION="${SSO_VERSION:-1.1.2}"
 REPO_URL="https://github.com/ach1992/simple-server-optimizer"
 
 require_root
