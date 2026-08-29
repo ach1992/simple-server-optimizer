@@ -61,14 +61,58 @@ hex_mask_all_cpus() {
   printf '%s\n' "${parts[*]}"
 }
 
+# RPS/RFS/XPS is a rollback-sensitive operation. Some VM/virtio drivers expose
+# an xps_cpus sysfs entry that can be discovered/stat'ed but cannot actually be
+# read. In that state backup_capture_cpu_runtime cannot certify a reversible
+# baseline. Detect the exact queue path before backup creation so the menu can
+# fail closed with an actionable explanation instead of exiting under set -e.
+cpu_irq_preflight_queue_snapshot() {
+  local nic="$1"
+  local net_root="${SSO_SYS_CLASS_NET_DIR:-/sys/class/net}"
+  local f
+
+  if [[ ! -d "$net_root/$nic/queues" ]]; then
+    err "CPU queue state is unavailable for NIC $nic: $net_root/$nic/queues"
+    warn "No RPS/RFS/XPS settings were changed."
+    return 1
+  fi
+
+  for f in \
+    "$net_root/$nic"/queues/rx-*/rps_cpus \
+    "$net_root/$nic"/queues/rx-*/rps_flow_cnt \
+    "$net_root/$nic"/queues/tx-*/xps_cpus; do
+    [[ -e "$f" || -L "$f" ]] || continue
+    if ! cat "$f" >/dev/null 2>&1; then
+      err "Cannot read CPU queue state required for rollback: $f"
+      warn "The NIC/driver exposes this queue control but does not provide a readable pre-change value."
+      warn "No RPS/RFS/XPS settings were changed."
+      return 1
+    fi
+  done
+
+  return 0
+}
+
 module_cpu_irq_apply_rps() {
   header
   section "Apply RPS/RFS/XPS"
-  local d
-  d="$(backup_create "cpu_irq:rps_rfs_xps")"
 
-  local nic cpus mask
+  local nic cpus mask d
   nic="$(detect_nic)"
+
+  if ! cpu_irq_preflight_queue_snapshot "$nic"; then
+    pause
+    return 0
+  fi
+
+  if ! d="$(backup_create "cpu_irq:rps_rfs_xps")"; then
+    err "Could not create a complete pre-change backup."
+    warn "No RPS/RFS/XPS settings were changed."
+    warn "Review the backup error above before retrying."
+    pause
+    return 0
+  fi
+
   cpus="$(nproc)"
   if ! mask="$(hex_mask_all_cpus "$cpus")"; then
     err "Could not calculate a CPU mask for $cpus CPUs."
