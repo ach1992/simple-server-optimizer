@@ -5,7 +5,8 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/tests/lib/testlib.sh"
 
 test_release_candidate_version_is_visible() {
-  grep -q '^SSO_VERSION="1\.1\.0"$' "$ROOT_DIR/sso.sh" || return 1
+  grep -q '^SSO_VERSION="1\.1\.2"$' "$ROOT_DIR/sso.sh" || return 1
+  grep -q '^VERSION="${SSO_VERSION:-1\.1\.2}"$' "$ROOT_DIR/sso.sh" || return 1
 }
 
 test_fail2ban_menu_does_not_claim_service_stop_is_rollback() {
@@ -80,7 +81,7 @@ test_firewall_system_check_accepts_iptables_with_ipset() {
   grep -Fq 'SSO firewall backend: iptables + ipset ready' <<<"$output" || return 1
 }
 
-run_test "v1.1.0 release-candidate version is shown in the UI" test_release_candidate_version_is_visible
+run_test "v1.1.2 release-candidate version is shown in the UI" test_release_candidate_version_is_visible
 run_test "Fail2Ban menu describes SSO-only disable behavior" test_fail2ban_menu_does_not_claim_service_stop_is_rollback
 run_test "invalid Fail2Ban whitelist returns cleanly to the menu" test_fail2ban_invalid_whitelist_returns_to_menu
 run_test "network apply failures are not presented as unconditional success" test_network_apply_does_not_report_unconditional_success
