@@ -35,6 +35,18 @@ make_strict_cpu_snapshot() {
   printf 'inactive\n' > "$d/services/sso-cpuirq.service/active"
 }
 
+make_partial_cpu_snapshot() {
+  local d="$1"
+  make_strict_cpu_snapshot "$d"
+  rm -rf "$d/cpu_irq/runtime/queues/tx-0" "$d/cpu_irq/runtime/queues/tx-1"
+  cat > "$d/cpu_irq/runtime/managed-queues" <<'EOF_MANAGED'
+rx-0/rps_cpus
+rx-0/rps_flow_cnt
+rx-1/rps_cpus
+rx-1/rps_flow_cnt
+EOF_MANAGED
+}
+
 make_live_rps_fixture() {
   local root="$1"
   mkdir -p \
@@ -133,6 +145,9 @@ run_full_uninstall_fixture() {
 
     source "$ROOT_DIR/modules/utils.sh"
     source "$ROOT_DIR/modules/rollback.sh"
+    # Runtime sso.sh sources cpu_irq.sh after rollback.sh; do the same here so
+    # uninstall exercises the capability-aware capture/restore override.
+    source "$ROOT_DIR/modules/cpu_irq.sh"
     source "$ROOT_DIR/modules/uninstall.sh"
 
     header(){ :; }; section(){ :; }; info(){ :; }; pause(){ :; }; ok(){ :; }
@@ -181,6 +196,35 @@ full_uninstall_restores_cpu_runtime_before_cleanup() {
   return "$test_rc"
 }
 
+partial_uninstall_restores_managed_rps_rfs_and_preserves_xps() {
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  make_uninstall_owned_files "$tmp"
+  make_live_rps_fixture "$tmp"
+  make_partial_cpu_snapshot "$tmp/backups/20260828-120000"
+  # XPS was skipped by SSO in this snapshot generation. Model independent
+  # runtime values and require uninstall to leave them exactly untouched.
+  printf '7\n' > "$tmp/sys/class/net/test0/queues/tx-0/xps_cpus"
+  printf '8\n' > "$tmp/sys/class/net/test0/queues/tx-1/xps_cpus"
+
+  run_full_uninstall_fixture "$tmp" 0 >/dev/null 2>&1
+  local rc=$?
+  if [[ "$rc" -ne 0 ]]; then rm -rf "$tmp"; return 1; fi
+
+  local test_rc=0
+  [[ "$(cat "$tmp/rps-global")" == "0" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/rx-0/rps_cpus")" == "0" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/rx-1/rps_cpus")" == "0" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/rx-0/rps_flow_cnt")" == "0" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/rx-1/rps_flow_cnt")" == "0" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/tx-0/xps_cpus")" == "7" ]] || test_rc=1
+  [[ "$(cat "$tmp/sys/class/net/test0/queues/tx-1/xps_cpus")" == "8" ]] || test_rc=1
+  [[ ! -e "$tmp/state" && ! -e "$tmp/backups" && ! -e "$tmp/install" ]] || test_rc=1
+
+  rm -rf "$tmp"
+  return "$test_rc"
+}
+
 restore_failure_preserves_recovery_and_persistence() {
   local tmp
   tmp="$(mktemp -d)" || return 1
@@ -223,6 +267,7 @@ previous_install_backup_fallback_requires_strict_snapshot() {
     mkdir -p "$STATE_DIR"
     source "$ROOT_DIR/modules/utils.sh"
     source "$ROOT_DIR/modules/rollback.sh"
+    source "$ROOT_DIR/modules/cpu_irq.sh"
     source "$ROOT_DIR/modules/uninstall.sh"
     if uninstall_cpu_runtime_snapshot_is_preownership "$BACKUP_DIR_BASE/20260828-120000"; then
       exit 1
@@ -235,7 +280,8 @@ previous_install_backup_fallback_requires_strict_snapshot() {
   return "$rc"
 }
 
-run_test "full uninstall restores exact CPU runtime before destructive cleanup" full_uninstall_restores_cpu_runtime_before_cleanup
+run_test "full uninstall restores exact legacy CPU runtime before destructive cleanup" full_uninstall_restores_cpu_runtime_before_cleanup
+run_test "partial uninstall restores managed RPS/RFS and preserves skipped XPS" partial_uninstall_restores_managed_rps_rfs_and_preserves_xps
 run_test "CPU restore failure preserves uninstall recovery and persistence evidence" restore_failure_preserves_recovery_and_persistence
 run_test "previous-install CPU baseline fallback requires a strict current-format snapshot" previous_install_backup_fallback_requires_strict_snapshot
 finish_tests
